@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy import create_engine
@@ -9,9 +10,6 @@ from typing import Optional
 # Import our models and Firebase config
 from models import Base, User, Subscription
 from config.firebase_config import firebase_config
-
-# Create FastAPI app
-app = FastAPI(title="Betty API", description="A FastAPI application with SQLAdmin and Firebase Auth")
 
 # Database setup
 SQLALCHEMY_DATABASE_URL = "sqlite:///./betty.db"
@@ -72,6 +70,19 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     
     return user
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    yield
+    # Shutdown
+
+# Create FastAPI app with lifespan
+app = FastAPI(
+    title="Betty API", 
+    description="A FastAPI application with SQLAdmin and Firebase Auth",
+    lifespan=lifespan
+)
+
 # SQLAdmin setup
 admin = Admin(app, engine)
 
@@ -80,16 +91,14 @@ class UserAdmin(ModelView, model=User):
     column_list = [User.id, User.email, User.display_name, User.is_active, User.last_login_at, User.created_at]
     column_searchable_list = [User.email, User.display_name, User.first_name, User.last_name]
     column_sortable_list = [User.id, User.email, User.created_at, User.last_login_at]
-    column_exclude_list = [User.firebase_uid]  # Hide sensitive data
 
 # ModelView for Subscription
 class SubscriptionAdmin(ModelView, model=Subscription):
     column_list = [Subscription.id, Subscription.user_id, Subscription.subscription_type, 
                    Subscription.status, Subscription.amount_paid, Subscription.start_date, 
-                   Subscription.end_date, Subscription.is_active]
+                   Subscription.end_date]
     column_searchable_list = [Subscription.payment_reference]
     column_sortable_list = [Subscription.id, Subscription.start_date, Subscription.end_date, Subscription.amount_paid]
-    column_exclude_list = [Subscription.payment_reference]  # Hide sensitive data
 
 # Add the model views to admin
 admin.add_view(UserAdmin)

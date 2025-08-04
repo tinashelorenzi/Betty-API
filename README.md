@@ -86,6 +86,7 @@ Betty-API/
 ├── config/             # Configuration files
 │   ├── __init__.py
 │   └── firebase_config.py # Firebase configuration
+├── credentials/        # Firebase credentials (if using service account)
 ├── main.py             # FastAPI application
 ├── requirements.txt    # Python dependencies
 ├── README.md          # This file
@@ -147,7 +148,7 @@ The SQLAdmin interface provides a web-based admin panel where you can:
 
 ### Adding New Models
 
-1. Create a new model in the `models/` directory
+1. Create a new model in the `models/` directory using SQLAlchemy
 2. Import it in `models/__init__.py`
 3. Create a corresponding ModelView class in `main.py`
 4. Add the view to the admin instance

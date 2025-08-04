@@ -55,7 +55,7 @@ class Subscription(Base, TimestampMixin):
     @property
     def is_active(self):
         """Check if subscription is currently active"""
-        now = datetime.utcnow()
+        now = datetime.now()
         return (
             self.status == SubscriptionStatus.ACTIVE and
             self.start_date <= now <= self.end_date
@@ -64,20 +64,20 @@ class Subscription(Base, TimestampMixin):
     @property
     def is_expired(self):
         """Check if subscription has expired"""
-        return datetime.utcnow() > self.end_date
+        return datetime.now() > self.end_date
     
     @property
     def days_remaining(self):
         """Get number of days remaining in subscription"""
         if not self.is_active:
             return 0
-        remaining = self.end_date - datetime.utcnow()
+        remaining = self.end_date - datetime.now()
         return max(0, remaining.days)
     
     def calculate_end_date(self, start_date=None):
         """Calculate end date based on subscription type"""
         if start_date is None:
-            start_date = datetime.utcnow()
+            start_date = datetime.now()
         
         if self.subscription_type == SubscriptionType.MONTHLY:
             return start_date + timedelta(days=30)
@@ -117,7 +117,7 @@ class Subscription(Base, TimestampMixin):
     def cancel_subscription(self, reason=None):
         """Cancel the subscription"""
         self.status = SubscriptionStatus.CANCELLED
-        self.cancelled_at = datetime.utcnow()
+        self.cancelled_at = datetime.now()
         self.cancellation_reason = reason
         self.auto_renew = False
         self.next_billing_date = None

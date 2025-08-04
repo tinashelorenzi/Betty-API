@@ -46,7 +46,7 @@ class User(Base, TimestampMixin):
     
     def update_last_login(self):
         """Update the last login timestamp"""
-        self.last_login_at = datetime.utcnow()
+        self.last_login_at = datetime.now()
     
     def to_dict(self):
         """Convert user to dictionary for API responses"""
