@@ -4,6 +4,11 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from contextlib import asynccontextmanager
 import uvicorn
 from typing import Optional
+import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Import our custom modules
 from services.firebase_service import FirebaseService
@@ -20,15 +25,19 @@ from models.planner_models import TaskCreate, TaskResponse, TaskUpdate, NoteCrea
 firebase_service = FirebaseService()
 auth_service = AuthService(firebase_service)
 document_service = DocumentService(firebase_service)
-ai_service = AIService()
+ai_service = AIService(firebase_service)
 planner_service = PlannerService(firebase_service)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     print("🚀 Betty Backend starting up...")
-    firebase_service.initialize()
-    print("✅ Firebase initialized")
+    try:
+        firebase_service.initialize()
+        print("✅ Firebase initialized")
+    except Exception as e:
+        print(f"⚠️  Firebase initialization failed: {e}")
+        print("The app will continue but Firebase features may not work")
     yield
     # Shutdown
     print("👋 Betty Backend shutting down...")
@@ -41,9 +50,10 @@ app = FastAPI(
 )
 
 # CORS middleware
+allowed_origins = os.getenv("ALLOWED_ORIGINS", "*").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure this properly in production
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -67,7 +77,12 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
 # Health check
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "message": "Betty Backend is running!"}
+    return {
+        "status": "healthy", 
+        "message": "Betty Backend is running!",
+        "firebase_initialized": firebase_service._initialized,
+        "ai_initialized": ai_service.model is not None
+    }
 
 # ============================================================================
 # AUTH ROUTES
@@ -316,19 +331,40 @@ async def get_admin_stats(user=Depends(get_current_user)):
     # TODO: Add admin role checking
     try:
         stats = {
-            "total_users": await firebase_service.get_collection_count("users"),
-            "total_documents": await firebase_service.get_collection_count("documents"),
-            "total_tasks": await firebase_service.get_collection_count("tasks"),
+            "total_users": await firebase_service.get_collection_count("users") if firebase_service._initialized else 0,
+            "total_documents": await firebase_service.get_collection_count("documents") if firebase_service._initialized else 0,
+            "total_tasks": await firebase_service.get_collection_count("tasks") if firebase_service._initialized else 0,
         }
         return stats
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# ============================================================================
+# DEVELOPMENT/TEST ROUTES
+# ============================================================================
+
+@app.get("/test/env")
+async def test_env_vars():
+    """Test endpoint to check environment variables (remove in production)"""
+    return {
+        "firebase_path_set": bool(os.getenv("FIREBASE_CREDENTIALS_PATH")),
+        "firebase_json_set": bool(os.getenv("FIREBASE_CREDENTIALS_JSON")),
+        "google_ai_key_set": bool(os.getenv("GOOGLE_AI_API_KEY")),
+        "debug": os.getenv("DEBUG", "False"),
+        "environment_loaded": True
+    }
+
 if __name__ == "__main__":
+    # Get configuration from environment
+    host = os.getenv("API_HOST", "0.0.0.0")
+    port = int(os.getenv("API_PORT", "8000"))
+    reload = os.getenv("API_RELOAD", "True").lower() == "true"
+    log_level = os.getenv("LOG_LEVEL", "info").lower()
+    
     uvicorn.run(
         "main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-        log_level="info"
+        host=host,
+        port=port,
+        reload=reload,
+        log_level=log_level
     )
