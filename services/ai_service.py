@@ -1,0 +1,397 @@
+import google.generativeai as genai
+from typing import List, Dict, Any, Optional
+from datetime import datetime
+import os
+import time
+import json
+import re
+
+from models.chat_models import ChatMessage, ChatResponse, MessageHistory, MessageRole, MessageType, AIContext
+from services.firebase_service import FirebaseService
+
+class AIService:
+    """Service for AI operations using Google Gemini"""
+    
+    def __init__(self, firebase_service: Optional[FirebaseService] = None):
+        self.firebase_service = firebase_service
+        self.model = None
+        self._initialize_ai()
+    
+    def _initialize_ai(self):
+        """Initialize Google Gemini AI"""
+        try:
+            api_key = os.getenv("GOOGLE_AI_API_KEY")
+            if not api_key:
+                raise ValueError("GOOGLE_AI_API_KEY environment variable not set")
+            
+            genai.configure(api_key=api_key)
+            self.model = genai.GenerativeModel('gemini-pro')
+            print("✅ Google Gemini AI initialized successfully")
+            
+        except Exception as e:
+            print(f"❌ AI initialization failed: {e}")
+            # Use fallback mock response for development
+            self.model = None
+    
+    async def process_message(self, message: ChatMessage, user_id: str) -> ChatResponse:
+        """Process user message and return AI response"""
+        try:
+            start_time = time.time()
+            
+            # Get user context
+            context = await self._get_user_context(user_id)
+            
+            # Build prompt with context
+            system_prompt = self._build_system_prompt(context)
+            full_prompt = f"{system_prompt}\n\nUser message: {message.content}"
+            
+            # Generate AI response
+            if self.model:
+                response = await self._generate_ai_response(full_prompt)
+            else:
+                # Fallback mock response
+                response = await self._generate_mock_response(message.content)
+            
+            processing_time = time.time() - start_time
+            
+            # Parse response for special actions
+            parsed_response = self._parse_ai_response(response)
+            
+            # Save message history
+            if self.firebase_service:
+                await self._save_message_history(user_id, message.content, response, processing_time)
+            
+            return ChatResponse(
+                content=parsed_response["content"],
+                message_type=MessageType(parsed_response.get("message_type", "text")),
+                document_created=parsed_response.get("document_created", False),
+                document_title=parsed_response.get("document_title"),
+                document_content=parsed_response.get("document_content"),
+                document_type=parsed_response.get("document_type"),
+                task_created=parsed_response.get("task_created", False),
+                task_data=parsed_response.get("task_data"),
+                calendar_event_created=parsed_response.get("calendar_event_created", False),
+                event_data=parsed_response.get("event_data"),
+                processing_time=processing_time,
+                tokens_used=parsed_response.get("tokens_used"),
+                confidence_score=parsed_response.get("confidence_score", 0.9)
+            )
+            
+        except Exception as e:
+            return ChatResponse(
+                content=f"I apologize, but I'm having trouble processing your request right now. Error: {str(e)}",
+                message_type=MessageType.TEXT,
+                processing_time=time.time() - start_time if 'start_time' in locals() else 0
+            )
+    
+    async def _generate_ai_response(self, prompt: str) -> str:
+        """Generate response using Google Gemini"""
+        try:
+            response = self.model.generate_content(
+                prompt,
+                generation_config=genai.types.GenerationConfig(
+                    candidate_count=1,
+                    max_output_tokens=2048,
+                    temperature=0.7,
+                )
+            )
+            return response.text
+        except Exception as e:
+            raise Exception(f"AI generation failed: {e}")
+    
+    async def _generate_mock_response(self, user_message: str) -> str:
+        """Generate mock response for development/fallback"""
+        user_message = user_message.lower()
+        
+        if "create" in user_message and any(doc_type in user_message for doc_type in ["contract", "invoice", "nda", "template"]):
+            doc_type = "contract" if "contract" in user_message else "invoice" if "invoice" in user_message else "document"
+            return f"I'll create a {doc_type} template for you. You can find it in the Documents section.|||**{doc_type.title()} Template**\n\n**TITLE:** Sample {doc_type.title()}\n\n**Content:** This is a sample {doc_type} template generated by Betty AI.\n\n**Date:** {datetime.now().strftime('%Y-%m-%d')}\n\n[Template content would go here...]"
+        
+        elif "task" in user_message and "create" in user_message:
+            return "I can help you create tasks! What specific task would you like me to add to your planner?"
+        
+        elif "help" in user_message or "what can you do" in user_message:
+            return """Hello! I'm Betty, your AI business assistant. I can help you with:
+
+📝 **Document Creation**: Create contracts, invoices, business plans, NDAs, and more
+📋 **Task Management**: Create and manage your tasks and to-do lists  
+📅 **Calendar**: Help with scheduling and event planning
+📊 **Business Analysis**: Provide insights and advice for your business
+🔍 **Research**: Find information and answer business questions
+📈 **Planning**: Assist with project planning and strategy
+
+Just ask me anything business-related, or tell me to create a specific document or task!"""
+        
+        else:
+            return f"Thank you for your message: '{user_message}'. As your AI business assistant, I'm here to help with documents, tasks, planning, and business advice. How can I assist you today?"
+    
+    def _build_system_prompt(self, context: AIContext) -> str:
+        """Build system prompt with user context"""
+        current_time = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p SAST")
+        
+        prompt = f"""You are "Betty", an expert AI business assistant specifically designed for South African businesses. 
+
+**CURRENT CONTEXT:**
+- Time: {current_time}  
+- User Location: {context.user_location}
+- User Timezone: {context.user_timezone}
+
+**YOUR CAPABILITIES:**
+- Business strategy and planning advice
+- South African business law and regulations (CIPC, SARS, etc.)
+- Document creation (contracts, MOIs, business plans, invoices, etc.)
+- Task and project management
+- Financial analysis and accounting guidance
+- Marketing and sales strategies
+- HR and employment law (South African context)
+
+**DOCUMENT CREATION INSTRUCTIONS:**
+When a user asks you to create a document or template, you MUST respond in two parts separated by '|||':
+1. A user-facing confirmation message
+2. The complete document content
+
+Example format:
+"I've created the [Document Name] for you. You can find it in the Documents section.|||**[DOCUMENT TITLE]**\n\n[Full document content here]"
+
+**COMMUNICATION STYLE:**
+- Professional but friendly and approachable
+- Use South African business terminology where appropriate
+- Provide actionable, practical advice
+- Be concise but thorough
+- Always consider South African legal and business context
+
+**RECENT CONTEXT:**
+- Recent documents: {len(context.recent_documents)} documents
+- Recent tasks: {len(context.recent_tasks)} tasks
+- Conversation history: {len(context.conversation_history)} previous messages"""
+
+        return prompt
+    
+    def _parse_ai_response(self, response: str) -> Dict[str, Any]:
+        """Parse AI response for special actions and content"""
+        parsed = {
+            "content": response,
+            "message_type": "text",
+            "document_created": False,
+            "task_created": False,
+            "calendar_event_created": False
+        }
+        
+        # Check for document creation (|||separator)
+        if "|||" in response:
+            parts = response.split("|||", 1)
+            parsed["content"] = parts[0].strip()
+            parsed["document_created"] = True
+            parsed["message_type"] = "document_creation"
+            
+            # Extract document content
+            doc_content = parts[1].strip()
+            
+            # Extract title from content
+            title_match = re.search(r'\*\*([^*]+)\*\*', doc_content)
+            parsed["document_title"] = title_match.group(1) if title_match else "AI Generated Document"
+            parsed["document_content"] = doc_content
+            
+            # Determine document type based on content
+            content_lower = doc_content.lower()
+            if "contract" in content_lower:
+                parsed["document_type"] = "contract"
+            elif "invoice" in content_lower:
+                parsed["document_type"] = "invoice"
+            elif "business plan" in content_lower:
+                parsed["document_type"] = "business_plan"
+            elif "nda" in content_lower or "non-disclosure" in content_lower:
+                parsed["document_type"] = "nda"
+            else:
+                parsed["document_type"] = "ai_generated"
+        
+        # Check for task creation indicators
+        task_indicators = ["create task", "add task", "new task", "task:"]
+        if any(indicator in response.lower() for indicator in task_indicators):
+            parsed["task_created"] = True
+            parsed["message_type"] = "task_creation"
+            # Extract task data if found
+            # This is a simplified extraction - could be made more sophisticated
+            parsed["task_data"] = {"title": "AI Generated Task", "priority": "medium"}
+        
+        return parsed
+    
+    async def _get_user_context(self, user_id: str) -> AIContext:
+        """Get user context for AI conversation"""
+        try:
+            context = AIContext(
+                current_time=datetime.now(),
+                user_location="Johannesburg, South Africa",
+                user_timezone="Africa/Johannesburg"
+            )
+            
+            if self.firebase_service:
+                # Get user profile
+                user_profile = await self.firebase_service.get_user_profile(user_id)
+                if user_profile:
+                    context.user_location = user_profile.get("location", context.user_location)
+                    context.user_timezone = user_profile.get("timezone", context.user_timezone)
+                
+                # Get recent conversation history
+                recent_messages = await self.get_chat_history(user_id, limit=5)
+                context.conversation_history = recent_messages
+                
+                # Get recent documents and tasks
+                recent_docs = await self.firebase_service.get_user_documents(
+                    user_id, "documents", limit=5
+                )
+                context.recent_documents = [doc["id"] for doc in recent_docs]
+                
+                recent_tasks = await self.firebase_service.get_user_documents(
+                    user_id, "tasks", limit=5
+                )
+                context.recent_tasks = [task["id"] for task in recent_tasks]
+            
+            return context
+            
+        except Exception as e:
+            # Return default context if error
+            return AIContext(
+                current_time=datetime.now(),
+                user_location="Johannesburg, South Africa",
+                user_timezone="Africa/Johannesburg"
+            )
+    
+    async def _save_message_history(
+        self, 
+        user_id: str, 
+        user_message: str, 
+        ai_response: str, 
+        processing_time: float
+    ):
+        """Save conversation to message history"""
+        try:
+            if not self.firebase_service:
+                return
+            
+            timestamp = datetime.utcnow()
+            
+            # Save user message
+            user_msg_data = {
+                "user_id": user_id,
+                "role": MessageRole.USER.value,
+                "content": user_message,
+                "message_type": MessageType.TEXT.value,
+                "timestamp": timestamp,
+                "processing_time": None,
+                "context": {}
+            }
+            
+            await self.firebase_service.create_document("chat_history", user_msg_data)
+            
+            # Save AI response
+            ai_msg_data = {
+                "user_id": user_id,
+                "role": MessageRole.ASSISTANT.value,
+                "content": ai_response,
+                "message_type": MessageType.TEXT.value,
+                "timestamp": timestamp,
+                "processing_time": processing_time,
+                "context": {}
+            }
+            
+            await self.firebase_service.create_document("chat_history", ai_msg_data)
+            
+        except Exception as e:
+            print(f"Failed to save message history: {e}")
+    
+    async def get_chat_history(self, user_id: str, limit: int = 50) -> List[MessageHistory]:
+        """Get user's chat history"""
+        try:
+            if not self.firebase_service:
+                return []
+            
+            messages = await self.firebase_service.query_documents(
+                "chat_history",
+                filters=[("user_id", "==", user_id)],
+                order_by="-timestamp",
+                limit=limit
+            )
+            
+            return [MessageHistory(**msg) for msg in messages]
+            
+        except Exception as e:
+            print(f"Failed to get chat history: {e}")
+            return []
+    
+    async def clear_chat_history(self, user_id: str) -> bool:
+        """Clear user's chat history"""
+        try:
+            if not self.firebase_service:
+                return False
+            
+            # Get all user messages
+            messages = await self.firebase_service.query_documents(
+                "chat_history",
+                filters=[("user_id", "==", user_id)]
+            )
+            
+            # Delete all messages
+            for msg in messages:
+                await self.firebase_service.delete_document("chat_history", msg["id"])
+            
+            return True
+            
+        except Exception as e:
+            print(f"Failed to clear chat history: {e}")
+            return False
+    
+    async def get_conversation_summary(self, user_id: str) -> Dict[str, Any]:
+        """Get conversation summary for user"""
+        try:
+            messages = await self.get_chat_history(user_id, limit=100)
+            
+            if not messages:
+                return {
+                    "total_messages": 0,
+                    "last_message_at": None,
+                    "topics_discussed": [],
+                    "documents_created": 0,
+                    "tasks_created": 0
+                }
+            
+            # Analyze messages
+            user_messages = [msg for msg in messages if msg.role == MessageRole.USER]
+            ai_messages = [msg for msg in messages if msg.role == MessageRole.ASSISTANT]
+            
+            # Count document and task creations
+            documents_created = len([msg for msg in ai_messages if "|||" in msg.content])
+            tasks_created = len([msg for msg in ai_messages if msg.message_type == MessageType.TASK_CREATION])
+            
+            # Extract topics (simplified)
+            topics = set()
+            for msg in user_messages:
+                content = msg.content.lower()
+                if "contract" in content:
+                    topics.add("contracts")
+                if "invoice" in content:
+                    topics.add("invoices")
+                if "task" in content:
+                    topics.add("tasks")
+                if "business plan" in content:
+                    topics.add("business planning")
+                if "help" in content:
+                    topics.add("general help")
+            
+            return {
+                "total_messages": len(messages),
+                "last_message_at": messages[0].timestamp if messages else None,
+                "topics_discussed": list(topics),
+                "documents_created": documents_created,
+                "tasks_created": tasks_created
+            }
+            
+        except Exception as e:
+            print(f"Failed to get conversation summary: {e}")
+            return {
+                "total_messages": 0,
+                "last_message_at": None,
+                "topics_discussed": [],
+                "documents_created": 0,
+                "tasks_created": 0
+            }
