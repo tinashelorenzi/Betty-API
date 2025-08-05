@@ -8,8 +8,9 @@ import uuid
 class DocumentService:
     """Service for document operations"""
     
-    def __init__(self, firebase_service: FirebaseService):
+    def __init__(self, firebase_service: FirebaseService, google_service=None):
         self.firebase_service = firebase_service
+        self.google_service = google_service  # Will be injected
         self.collection_name = "documents"
     
     async def create_document(self, document: DocumentCreate, user_id: str) -> DocumentResponse:
@@ -210,8 +211,8 @@ class DocumentService:
                 content=original_doc.content,
                 document_type=DocumentType(original_doc.document_type),
                 status=original_doc.status,
-                tags=original_doc.tags.copy(),
-                metadata=original_doc.metadata.copy()
+                tags=original_doc.tags.copy() if original_doc.tags else [],
+                metadata=original_doc.metadata.copy() if original_doc.metadata else {}
             )
             
             return await self.create_document(duplicate_data, user_id)
@@ -238,10 +239,20 @@ class DocumentService:
             if not user_profile.get("google_connected"):
                 raise ValueError("Google account not connected")
             
-            # TODO: Implement actual Google Docs API integration
-            # For now, we'll simulate the export
-            google_doc_id = f"gdoc_{uuid.uuid4().hex[:12]}"
-            google_doc_url = f"https://docs.google.com/document/d/{google_doc_id}/edit"
+            if self.google_service:
+                # Use real Google Docs API
+                google_doc = await self.google_service.create_google_doc(
+                    user_id,
+                    doc["title"],
+                    doc["content"]
+                )
+                
+                google_doc_id = google_doc["document_id"]
+                google_doc_url = google_doc["document_url"]
+            else:
+                # Fallback to mock (for development)
+                google_doc_id = f"gdoc_{uuid.uuid4().hex[:12]}"
+                google_doc_url = f"https://docs.google.com/document/d/{google_doc_id}/edit"
             
             # Update document with Google Docs info
             await self.firebase_service.update_document(

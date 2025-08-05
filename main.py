@@ -16,6 +16,7 @@ from services.auth_service import AuthService
 from services.document_service import DocumentService
 from services.ai_service import AIService
 from services.planner_service import PlannerService
+from services.google_service import GoogleService
 from models.user_models import UserCreate, UserResponse
 from models.document_models import DocumentCreate, DocumentResponse, DocumentUpdate
 from models.chat_models import ChatMessage, ChatResponse
@@ -24,7 +25,8 @@ from models.planner_models import TaskCreate, TaskResponse, TaskUpdate, NoteCrea
 # Initialize services
 firebase_service = FirebaseService()
 auth_service = AuthService(firebase_service)
-document_service = DocumentService(firebase_service)
+google_service = GoogleService(firebase_service)
+document_service = DocumentService(firebase_service, google_service)
 ai_service = AIService(firebase_service)
 planner_service = PlannerService(firebase_service)
 
@@ -115,6 +117,46 @@ async def verify_token(user=Depends(get_current_user)):
 async def get_me(user=Depends(get_current_user)):
     """Get current user info"""
     return user
+
+# ============================================================================
+# GOOGLE OAUTH ROUTES
+# ============================================================================
+
+@app.get("/auth/google/connect")
+async def connect_google_account(user=Depends(get_current_user)):
+    """Get Google OAuth URL for connecting account"""
+    try:
+        auth_url = google_service.get_authorization_url(user["uid"])
+        return {"authorization_url": auth_url}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/auth/google/callback")
+async def google_oauth_callback(code: str, state: str):
+    """Handle Google OAuth callback"""
+    try:
+        result = await google_service.handle_oauth_callback(code, state)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/auth/google/disconnect")
+async def disconnect_google_account(user=Depends(get_current_user)):
+    """Disconnect Google account"""
+    try:
+        success = await google_service.disconnect_google_account(user["uid"])
+        return {"success": success, "message": "Google account disconnected"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/auth/google/status")
+async def get_google_connection_status(user=Depends(get_current_user)):
+    """Check Google connection status"""
+    try:
+        status = await google_service.check_google_connection_status(user["uid"])
+        return status
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================================
 # CHAT/AI ROUTES
@@ -232,6 +274,35 @@ async def export_to_google_docs(
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================================
+# GOOGLE WORKSPACE ROUTES
+# ============================================================================
+
+@app.get("/google/drive/files")
+async def list_google_drive_files(
+    file_type: str = "application/vnd.google-apps.document",
+    user=Depends(get_current_user)
+):
+    """List user's Google Drive files"""
+    try:
+        files = await google_service.list_user_drive_files(user["uid"], file_type)
+        return {"files": files}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/google/docs/create")
+async def create_google_document(
+    title: str,
+    content: str,
+    user=Depends(get_current_user)
+):
+    """Create a new Google Doc"""
+    try:
+        result = await google_service.create_google_doc(user["uid"], title, content)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
 # PLANNER ROUTES
 # ============================================================================
 
@@ -316,8 +387,37 @@ async def get_calendar_events(
 ):
     """Get calendar events (Google Calendar integration)"""
     try:
-        events = await planner_service.get_calendar_events(user["uid"], start_date, end_date)
+        events = await google_service.get_calendar_events(user["uid"], start_date, end_date)
         return {"events": events}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/planner/calendar/events")
+async def create_calendar_event(
+    event_data: dict,
+    user=Depends(get_current_user)
+):
+    """Create calendar event in Google Calendar"""
+    try:
+        result = await google_service.create_calendar_event(user["uid"], event_data)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/planner/notes/{note_id}/export-google")
+async def export_note_to_google_keep(
+    note_id: str,
+    user=Depends(get_current_user)
+):
+    """Export note to Google Keep"""
+    try:
+        note = await planner_service.get_note(note_id, user["uid"])
+        result = await google_service.create_keep_note(
+            user["uid"], 
+            note.title, 
+            note.content
+        )
+        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -350,6 +450,8 @@ async def test_env_vars():
         "firebase_path_set": bool(os.getenv("FIREBASE_CREDENTIALS_PATH")),
         "firebase_json_set": bool(os.getenv("FIREBASE_CREDENTIALS_JSON")),
         "google_ai_key_set": bool(os.getenv("GOOGLE_AI_API_KEY")),
+        "google_client_id_set": bool(os.getenv("GOOGLE_CLIENT_ID")),
+        "google_client_secret_set": bool(os.getenv("GOOGLE_CLIENT_SECRET")),
         "debug": os.getenv("DEBUG", "False"),
         "environment_loaded": True
     }
