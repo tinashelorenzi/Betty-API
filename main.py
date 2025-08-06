@@ -1,6 +1,7 @@
-from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import FastAPI, HTTPException, Depends, status, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 import uvicorn
 from typing import Optional
@@ -17,7 +18,11 @@ from services.document_service import DocumentService
 from services.ai_service import AIService
 from services.planner_service import PlannerService
 from services.google_service import GoogleService
-from models.user_models import UserCreate, UserResponse
+from services.profile_service import ProfileService
+from models.user_models import (
+    UserCreate, UserResponse, UserUpdate, ProfileStats, 
+    NotificationSettings, UserPreferences
+)
 from models.document_models import DocumentCreate, DocumentResponse, DocumentUpdate
 from models.chat_models import ChatMessage, ChatResponse
 from models.planner_models import TaskCreate, TaskResponse, TaskUpdate, NoteCreate, NoteResponse
@@ -29,11 +34,17 @@ google_service = GoogleService(firebase_service)
 document_service = DocumentService(firebase_service, google_service)
 ai_service = AIService(firebase_service)
 planner_service = PlannerService(firebase_service)
+profile_service = ProfileService(firebase_service, auth_service)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
     print("🚀 Betty Backend starting up...")
+    
+    # Create uploads directory if it doesn't exist
+    os.makedirs("uploads/avatars", exist_ok=True)
+    print("✅ Upload directories created")
+    
     try:
         firebase_service.initialize()
         print("✅ Firebase initialized")
@@ -50,6 +61,9 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+# Mount static files for serving uploaded images
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 # CORS middleware
 allowed_origins = os.getenv("ALLOWED_ORIGINS", "*").split(",")
@@ -117,6 +131,141 @@ async def verify_token(user=Depends(get_current_user)):
 async def get_me(user=Depends(get_current_user)):
     """Get current user info"""
     return user
+
+# ============================================================================
+# PROFILE ROUTES
+# ============================================================================
+
+@app.get("/profile/me", response_model=UserResponse)
+async def get_my_profile(user=Depends(get_current_user)):
+    """Get current user's profile information"""
+    return UserResponse(**user)
+
+@app.put("/profile/me", response_model=UserResponse)
+async def update_my_profile(
+    profile_update: UserUpdate,
+    user=Depends(get_current_user)
+):
+    """Update current user's profile"""
+    try:
+        updated_user = await profile_service.update_profile(
+            user["uid"], 
+            profile_update
+        )
+        return updated_user
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+
+@app.post("/profile/upload-avatar")
+async def upload_avatar(
+    file: UploadFile = File(...),
+    user=Depends(get_current_user)
+):
+    """Upload user avatar image"""
+    if not file.content_type.startswith('image/'):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File must be an image"
+        )
+    
+    try:
+        avatar_url = await profile_service.upload_avatar(
+            user["uid"], 
+            file
+        )
+        return {"avatar_url": avatar_url}
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to upload avatar: {str(e)}"
+        )
+
+@app.get("/profile/stats", response_model=ProfileStats)
+async def get_profile_stats(user=Depends(get_current_user)):
+    """Get user's activity statistics"""
+    try:
+        stats = await profile_service.get_user_stats(user["uid"])
+        return stats
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get stats: {str(e)}"
+        )
+
+@app.get("/profile/notifications", response_model=NotificationSettings)
+async def get_notification_settings(user=Depends(get_current_user)):
+    """Get user's notification preferences"""
+    try:
+        settings = await profile_service.get_notification_settings(user["uid"])
+        return settings
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get notification settings: {str(e)}"
+        )
+
+@app.put("/profile/notifications", response_model=NotificationSettings)
+async def update_notification_settings(
+    settings: NotificationSettings,
+    user=Depends(get_current_user)
+):
+    """Update user's notification preferences"""
+    try:
+        updated_settings = await profile_service.update_notification_settings(
+            user["uid"], 
+            settings
+        )
+        return updated_settings
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+
+@app.get("/profile/preferences", response_model=UserPreferences)
+async def get_user_preferences(user=Depends(get_current_user)):
+    """Get user's app preferences"""
+    try:
+        preferences = await profile_service.get_user_preferences(user["uid"])
+        return preferences
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get user preferences: {str(e)}"
+        )
+
+@app.put("/profile/preferences", response_model=UserPreferences)
+async def update_user_preferences(
+    preferences: UserPreferences,
+    user=Depends(get_current_user)
+):
+    """Update user's app preferences"""
+    try:
+        updated_preferences = await profile_service.update_user_preferences(
+            user["uid"], 
+            preferences
+        )
+        return updated_preferences
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+
+@app.delete("/profile/account")
+async def delete_account(user=Depends(get_current_user)):
+    """Delete user account (soft delete)"""
+    try:
+        await profile_service.delete_account(user["uid"])
+        return {"message": "Account scheduled for deletion"}
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete account: {str(e)}"
+        )
 
 # ============================================================================
 # GOOGLE OAUTH ROUTES
@@ -207,20 +356,17 @@ async def create_document(
 ):
     """Create a new document"""
     try:
-        doc = await document_service.create_document(document, user["uid"])
-        return doc
+        new_document = await document_service.create_document(document, user["uid"])
+        return new_document
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/documents", response_model=list[DocumentResponse])
-async def get_user_documents(
-    document_type: Optional[str] = None,
-    user=Depends(get_current_user)
-):
-    """Get all user documents"""
+async def get_documents(user=Depends(get_current_user)):
+    """Get user documents"""
     try:
-        docs = await document_service.get_user_documents(user["uid"], document_type)
-        return docs
+        documents = await document_service.get_documents(user["uid"])
+        return documents
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -231,8 +377,8 @@ async def get_document(
 ):
     """Get specific document"""
     try:
-        doc = await document_service.get_document(document_id, user["uid"])
-        return doc
+        document = await document_service.get_document(document_id, user["uid"])
+        return document
     except Exception as e:
         raise HTTPException(status_code=404, detail="Document not found")
 
@@ -244,8 +390,10 @@ async def update_document(
 ):
     """Update document"""
     try:
-        doc = await document_service.update_document(document_id, document_update, user["uid"])
-        return doc
+        updated_document = await document_service.update_document(
+            document_id, document_update, user["uid"]
+        )
+        return updated_document
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -262,42 +410,16 @@ async def delete_document(
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/documents/{document_id}/export-google")
-async def export_to_google_docs(
+async def export_document_to_google(
     document_id: str,
     user=Depends(get_current_user)
 ):
     """Export document to Google Docs"""
     try:
-        result = await document_service.export_to_google_docs(document_id, user["uid"])
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ============================================================================
-# GOOGLE WORKSPACE ROUTES
-# ============================================================================
-
-@app.get("/google/drive/files")
-async def list_google_drive_files(
-    file_type: str = "application/vnd.google-apps.document",
-    user=Depends(get_current_user)
-):
-    """List user's Google Drive files"""
-    try:
-        files = await google_service.list_user_drive_files(user["uid"], file_type)
-        return {"files": files}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/google/docs/create")
-async def create_google_document(
-    title: str,
-    content: str,
-    user=Depends(get_current_user)
-):
-    """Create a new Google Doc"""
-    try:
-        result = await google_service.create_google_doc(user["uid"], title, content)
+        document = await document_service.get_document(document_id, user["uid"])
+        result = await google_service.create_google_doc(
+            user["uid"], document.title, document.content
+        )
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -320,13 +442,10 @@ async def create_task(
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/planner/tasks", response_model=list[TaskResponse])
-async def get_tasks(
-    completed: Optional[bool] = None,
-    user=Depends(get_current_user)
-):
+async def get_tasks(user=Depends(get_current_user)):
     """Get user tasks"""
     try:
-        tasks = await planner_service.get_tasks(user["uid"], completed)
+        tasks = await planner_service.get_tasks(user["uid"])
         return tasks
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -339,8 +458,8 @@ async def update_task(
 ):
     """Update task"""
     try:
-        task = await planner_service.update_task(task_id, task_update, user["uid"])
-        return task
+        updated_task = await planner_service.update_task(task_id, task_update, user["uid"])
+        return updated_task
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -413,60 +532,17 @@ async def export_note_to_google_keep(
     try:
         note = await planner_service.get_note(note_id, user["uid"])
         result = await google_service.create_keep_note(
-            user["uid"], 
-            note.title, 
-            note.content
+            user["uid"], note.title, note.content
         )
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ============================================================================
-# ADMIN ROUTES (Optional)
-# ============================================================================
-
-@app.get("/admin/stats")
-async def get_admin_stats(user=Depends(get_current_user)):
-    """Get admin statistics - implement role checking"""
-    # TODO: Add admin role checking
-    try:
-        stats = {
-            "total_users": await firebase_service.get_collection_count("users") if firebase_service._initialized else 0,
-            "total_documents": await firebase_service.get_collection_count("documents") if firebase_service._initialized else 0,
-            "total_tasks": await firebase_service.get_collection_count("tasks") if firebase_service._initialized else 0,
-        }
-        return stats
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ============================================================================
-# DEVELOPMENT/TEST ROUTES
-# ============================================================================
-
-@app.get("/test/env")
-async def test_env_vars():
-    """Test endpoint to check environment variables (remove in production)"""
-    return {
-        "firebase_path_set": bool(os.getenv("FIREBASE_CREDENTIALS_PATH")),
-        "firebase_json_set": bool(os.getenv("FIREBASE_CREDENTIALS_JSON")),
-        "google_ai_key_set": bool(os.getenv("GOOGLE_AI_API_KEY")),
-        "google_client_id_set": bool(os.getenv("GOOGLE_CLIENT_ID")),
-        "google_client_secret_set": bool(os.getenv("GOOGLE_CLIENT_SECRET")),
-        "debug": os.getenv("DEBUG", "False"),
-        "environment_loaded": True
-    }
-
 if __name__ == "__main__":
-    # Get configuration from environment
-    host = os.getenv("API_HOST", "0.0.0.0")
-    port = int(os.getenv("API_PORT", "8000"))
-    reload = os.getenv("API_RELOAD", "True").lower() == "true"
-    log_level = os.getenv("LOG_LEVEL", "info").lower()
-    
     uvicorn.run(
         "main:app",
-        host=host,
-        port=port,
-        reload=reload,
-        log_level=log_level
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        log_level="info"
     )
