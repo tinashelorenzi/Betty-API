@@ -96,3 +96,42 @@ class ChatSettings(BaseModel):
     auto_create_tasks: bool = False
     language: str = "en"
     max_context_messages: int = 10
+
+class ConversationCreate(BaseModel):
+    """Model for creating a new conversation"""
+    title: Optional[str] = "New Chat"
+    
+class ConversationResponse(BaseModel):
+    """Model for conversation metadata response"""
+    id: str
+    conversation_id: str
+    user_id: str
+    title: str
+    message_count: int
+    last_message: str
+    last_message_at: datetime
+    created_at: datetime
+    updated_at: datetime
+    status: str = "active"
+
+class ConversationSummary(BaseModel):
+    """Model for conversation summary with recent messages"""
+    conversation: ConversationResponse
+    recent_messages: List[MessageHistory] = Field(default_factory=list)
+
+class ChatStatsResponse(BaseModel):
+    """Model for user chat statistics"""
+    total_conversations: int
+    total_messages: int
+    messages_today: int
+    avg_messages_per_conversation: float
+    last_chat_at: Optional[datetime] = None
+    
+class EnhancedChatMessage(ChatMessage):
+    """Enhanced chat message with conversation context"""
+    conversation_id: Optional[str] = None
+
+class EnhancedChatResponse(ChatResponse):
+    """Enhanced chat response with conversation context"""
+    conversation_id: Optional[str] = None
+    message_id: Optional[str] = None

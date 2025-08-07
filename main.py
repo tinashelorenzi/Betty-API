@@ -542,6 +542,64 @@ async def export_note_to_google_keep(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/chat/conversations")
+async def get_user_conversations(
+    user=Depends(get_current_user)
+):
+    """Get user's conversation list with metadata"""
+    try:
+        # Get conversations grouped by session/date
+        conversations = await ai_service.get_user_conversations(user["uid"])
+        return {"conversations": conversations}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/chat/conversation/new")
+async def create_new_conversation(
+    user=Depends(get_current_user)
+):
+    """Create a new conversation session"""
+    try:
+        conversation_id = await ai_service.create_conversation_session(user["uid"])
+        return {"conversation_id": conversation_id, "message": "New conversation created"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/chat/conversation/{conversation_id}")
+async def get_conversation_messages(
+    conversation_id: str,
+    user=Depends(get_current_user)
+):
+    """Get messages for a specific conversation"""
+    try:
+        messages = await ai_service.get_conversation_messages(user["uid"], conversation_id)
+        return {"messages": messages}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/chat/conversation/{conversation_id}")
+async def delete_conversation(
+    conversation_id: str,
+    user=Depends(get_current_user)
+):
+    """Delete a specific conversation"""
+    try:
+        success = await ai_service.delete_conversation(user["uid"], conversation_id)
+        return {"success": success, "message": "Conversation deleted"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/user/stats/chat")
+async def get_chat_stats(
+    user=Depends(get_current_user)
+):
+    """Get user's chat statistics for profile screen"""
+    try:
+        stats = await ai_service.get_user_chat_stats(user["uid"])
+        return stats
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 if __name__ == "__main__":
     uvicorn.run(
         "main:app",
