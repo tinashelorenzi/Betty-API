@@ -119,3 +119,4 @@ dmypy.json
 # macOS
 .DS_Store 
 credentials/betty-51dfe-firebase-adminsdk-fbsvc-2b66ab75d3.json
+uploads/avatars/

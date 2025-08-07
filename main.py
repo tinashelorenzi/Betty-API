@@ -600,6 +600,120 @@ async def get_chat_stats(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/debug/firebase-data")
+async def debug_firebase_data(
+    user=Depends(get_current_user)
+):
+    """Debug endpoint to check what's actually in Firebase"""
+    try:
+        user_id = user["uid"]
+        
+        # Check conversations collection
+        conversations = await firebase_service.query_documents("conversations")
+        user_conversations = [conv for conv in conversations if conv.get("user_id") == user_id]
+        
+        # Check chat_history collection  
+        chat_history = await firebase_service.query_documents("chat_history")
+        user_messages = [msg for msg in chat_history if msg.get("user_id") == user_id]
+        
+        # Check if collections exist at all
+        all_conversations = await firebase_service.query_documents("conversations", limit=5)
+        all_messages = await firebase_service.query_documents("chat_history", limit=5)
+        
+        debug_info = {
+            "user_id": user_id,
+            "collections_overview": {
+                "total_conversations_in_db": len(conversations),
+                "total_messages_in_db": len(chat_history),
+                "sample_conversations": all_conversations[:2],  # First 2 for inspection
+                "sample_messages": all_messages[:2]  # First 2 for inspection
+            },
+            "user_data": {
+                "user_conversations_count": len(user_conversations),
+                "user_messages_count": len(user_messages),
+                "user_conversations": user_conversations[:3],  # First 3 for inspection
+                "user_messages": user_messages[:3]  # First 3 for inspection
+            }
+        }
+        
+        return debug_info
+        
+    except Exception as e:
+        return {"error": str(e), "message": "Debug failed"}
+
+@app.get("/debug/test-chat-stats")
+async def debug_test_chat_stats(
+    user=Depends(get_current_user)
+):
+    """Test the chat stats specifically"""
+    try:
+        user_id = user["uid"]
+        
+        # Test each part of the stats calculation
+        conversations_raw = await firebase_service.query_documents(
+            "conversations",
+            filters=[("user_id", "==", user_id)]
+        )
+        
+        messages_raw = await firebase_service.query_documents(
+            "chat_history", 
+            filters=[("user_id", "==", user_id)]
+        )
+        
+        # Test today's messages
+        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_messages_raw = await firebase_service.query_documents(
+            "chat_history",
+            filters=[
+                ("user_id", "==", user_id),
+                ("timestamp", ">=", today_start)
+            ]
+        )
+        
+        return {
+            "user_id": user_id,
+            "raw_counts": {
+                "conversations_found": len(conversations_raw),
+                "messages_found": len(messages_raw), 
+                "today_messages_found": len(today_messages_raw)
+            },
+            "sample_data": {
+                "sample_conversation": conversations_raw[0] if conversations_raw else None,
+                "sample_message": messages_raw[0] if messages_raw else None
+            },
+            "query_filters_used": {
+                "user_filter": ("user_id", "==", user_id),
+                "today_start": today_start.isoformat()
+            }
+        }
+        
+    except Exception as e:
+        return {"error": str(e), "message": "Chat stats debug failed"}
+
+@app.get("/debug/collections-structure")
+async def debug_collections_structure():
+    """Check the overall structure of your Firebase collections"""
+    try:
+        # Get sample documents from each collection to see structure
+        conversations_sample = await firebase_service.query_documents("conversations", limit=3)
+        messages_sample = await firebase_service.query_documents("chat_history", limit=3)
+        
+        return {
+            "conversations_collection": {
+                "document_count": len(conversations_sample),
+                "sample_documents": conversations_sample,
+                "sample_fields": list(conversations_sample[0].keys()) if conversations_sample else []
+            },
+            "chat_history_collection": {
+                "document_count": len(messages_sample),
+                "sample_documents": messages_sample,
+                "sample_fields": list(messages_sample[0].keys()) if messages_sample else []
+            }
+        }
+        
+    except Exception as e:
+        return {"error": str(e), "message": "Structure debug failed"}
+
 if __name__ == "__main__":
     uvicorn.run(
         "main:app",

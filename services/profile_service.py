@@ -1,6 +1,6 @@
 # services/profile_service.py - COMPLETE LOCAL STORAGE VERSION
 from typing import Dict, Any, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import uuid
 import os
 import shutil
@@ -39,7 +39,7 @@ class ProfileService:
                 if value is not None:
                     update_data[field] = value
             
-            update_data['updated_at'] = datetime.utcnow()
+            update_data['updated_at'] = datetime.now(timezone.utc)
             
             # Update in Firestore
             await self.firebase_service.update_user_profile(uid, update_data)
@@ -82,7 +82,7 @@ class ProfileService:
                 uid, 
                 {
                     "avatar_url": avatar_url,
-                    "updated_at": datetime.utcnow()
+                    "updated_at": datetime.now(timezone.utc)
                 }
             )
             
@@ -111,11 +111,15 @@ class ProfileService:
                 if isinstance(created_at, str):
                     try:
                         created_date = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
-                        days_active = max(1, (datetime.utcnow() - created_date).days)
+                        days_active = max(1, (datetime.now(timezone.utc) - created_date).days)
                     except ValueError:
                         days_active = 1
                 elif isinstance(created_at, datetime):
-                    days_active = max(1, (datetime.utcnow() - created_at).days)
+                    # Ensure both datetimes are timezone-aware
+                    now = datetime.now(timezone.utc)
+                    if created_at.tzinfo is None:
+                        created_at = created_at.replace(tzinfo=timezone.utc)
+                    days_active = max(1, (now - created_at).days)
             
             # Generate reasonable mock stats based on account age
             base_multiplier = min(days_active, 30) / 30  # Cap at 30 days for realism
@@ -135,7 +139,12 @@ class ProfileService:
                     else:
                         last_login_date = last_login
                     
-                    days_since_login = (datetime.utcnow() - last_login_date).days
+                    # Ensure both datetimes are timezone-aware
+                    now = datetime.now(timezone.utc)
+                    if last_login_date.tzinfo is None:
+                        last_login_date = last_login_date.replace(tzinfo=timezone.utc)
+                    
+                    days_since_login = (now - last_login_date).days
                     if days_since_login <= 1:
                         streak_days = min(7, days_active)  # Show streak for recent users
                 except:
@@ -147,7 +156,7 @@ class ProfileService:
                 documents_created=documents_created,
                 hours_saved=hours_saved,
                 ai_chats=ai_chats,
-                last_activity=datetime.utcnow() if user_profile.get('last_login') else None,
+                last_activity=datetime.now(timezone.utc) if user_profile.get('last_login') else None,
                 streak_days=streak_days,
                 total_login_days=min(days_active, 30)
             )
@@ -178,7 +187,7 @@ class ProfileService:
                 user_doc_ref = self.firebase_service.db.document(f"users/{uid}")
                 user_doc_ref.update({
                     "notification_settings": default_settings.dict(),
-                    "updated_at": datetime.utcnow()
+                    "updated_at": datetime.now(timezone.utc)
                 })
             except Exception as save_error:
                 print(f"Warning: Could not save default notification settings: {save_error}")
@@ -197,14 +206,14 @@ class ProfileService:
         """Update user's notification preferences in Firestore"""
         try:
             settings.uid = uid
-            settings.updated_at = datetime.utcnow()
+            settings.updated_at = datetime.now(timezone.utc)
             settings_data = settings.dict()
             
             # Update the user document with notification settings
             user_doc_ref = self.firebase_service.db.document(f"users/{uid}")
             user_doc_ref.update({
                 "notification_settings": settings_data,
-                "updated_at": datetime.utcnow()
+                "updated_at": datetime.now(timezone.utc)
             })
             
             print(f"Notification settings updated for user {uid}")
@@ -235,7 +244,7 @@ class ProfileService:
                 user_doc_ref = self.firebase_service.db.document(f"users/{uid}")
                 user_doc_ref.update({
                     "user_preferences": default_prefs.dict(),
-                    "updated_at": datetime.utcnow()
+                    "updated_at": datetime.now(timezone.utc)
                 })
             except Exception as save_error:
                 print(f"Warning: Could not save default user preferences: {save_error}")
@@ -254,14 +263,14 @@ class ProfileService:
         """Update user's app preferences in Firestore"""
         try:
             preferences.uid = uid
-            preferences.updated_at = datetime.utcnow()
+            preferences.updated_at = datetime.now(timezone.utc)
             prefs_data = preferences.dict()
             
             # Update the user document with preferences
             user_doc_ref = self.firebase_service.db.document(f"users/{uid}")
             user_doc_ref.update({
                 "user_preferences": prefs_data,
-                "updated_at": datetime.utcnow()
+                "updated_at": datetime.now(timezone.utc)
             })
             
             print(f"User preferences updated for user {uid}")
@@ -278,8 +287,8 @@ class ProfileService:
                 uid,
                 {
                     "is_active": False,
-                    "deleted_at": datetime.utcnow(),
-                    "updated_at": datetime.utcnow()
+                    "deleted_at": datetime.now(timezone.utc),
+                    "updated_at": datetime.now(timezone.utc)
                 }
             )
             
@@ -290,8 +299,8 @@ class ProfileService:
                     deleted_user_ref = self.firebase_service.db.document(f"deleted_users/{uid}")
                     deleted_user_ref.set({
                         **user_data,
-                        "deleted_at": datetime.utcnow(),
-                        "archived_at": datetime.utcnow()
+                        "deleted_at": datetime.now(timezone.utc),
+                        "archived_at": datetime.now(timezone.utc)
                     })
             except Exception as archive_error:
                 print(f"Warning: Could not archive user data: {archive_error}")

@@ -7,6 +7,7 @@ import time
 import json
 import re
 import uuid
+from datetime import datetime, timezone
 
 from models.chat_models import ChatMessage, ChatResponse, MessageHistory, MessageRole, MessageType, AIContext
 from services.firebase_service import FirebaseService
@@ -19,6 +20,38 @@ class AIService:
         self.model = None
         self._initialize_ai()
     
+    def _normalize_datetime(self, dt) -> datetime:
+        """Normalize datetime to UTC timezone-aware format"""
+        if dt is None:
+            return datetime.now(timezone.utc)
+        
+        if isinstance(dt, datetime):
+            if dt.tzinfo is None:
+                # Naive datetime - assume UTC
+                return dt.replace(tzinfo=timezone.utc)
+            else:
+                # Already timezone-aware - convert to UTC
+                return dt.astimezone(timezone.utc)
+        
+        # If it's a string or other format, try to parse it
+        if isinstance(dt, str):
+            try:
+                parsed_dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+                return parsed_dt.astimezone(timezone.utc)
+            except:
+                return datetime.now(timezone.utc)
+        
+        return datetime.now(timezone.utc)
+
+    def _get_utc_now(self) -> datetime:
+        """Get current UTC time as timezone-aware datetime"""
+        return datetime.now(timezone.utc)
+    
+    def _get_today_start_utc(self) -> datetime:
+        """Get start of today in UTC as timezone-aware datetime"""
+        now = self._get_utc_now()
+        return now.replace(hour=0, minute=0, second=0, microsecond=0)
+
     def _initialize_ai(self):
         """Initialize Google Gemini AI"""
         try:
@@ -27,7 +60,7 @@ class AIService:
                 raise ValueError("GOOGLE_AI_API_KEY environment variable not set")
             
             genai.configure(api_key=api_key)
-            self.model = genai.GenerativeModel('gemini-pro')
+            self.model = genai.GenerativeModel('gemini-1.5-flash')
             print("✅ Google Gemini AI initialized successfully")
             
         except Exception as e:
@@ -279,7 +312,7 @@ Example format:
         processing_time: float,
         conversation_id: Optional[str] = None
     ):
-        """Save conversation to message history with conversation context"""
+        """Save conversation to message history with conversation context - FIXED DATETIME"""
         try:
             if not self.firebase_service:
                 return
@@ -288,7 +321,8 @@ Example format:
             if not conversation_id:
                 conversation_id = await self.create_conversation_session(user_id)
             
-            timestamp = datetime.utcnow()
+            # Use timezone-aware UTC timestamp
+            timestamp = self._get_utc_now()
             
             # Save user message
             user_msg_data = {
@@ -325,18 +359,18 @@ Example format:
             print(f"Failed to save message history: {e}")
     
     async def _update_conversation_metadata(self, user_id: str, conversation_id: str, last_message: str):
-        """Update conversation metadata with latest info"""
+        """Update conversation metadata with last message - FIXED DATETIME"""
         try:
             if not self.firebase_service:
                 return
             
-            # Generate a title from the first few words if it's still "New Chat"
+            # Generate title from first sentence of last message
             title = "New Chat"
-            if len(last_message) > 10:
-                title = last_message[:50] + "..." if len(last_message) > 50 else last_message
-                # Clean up the title
-                title = title.split('.')[0]  # Take first sentence
-                if len(title) < 10:
+            if last_message:
+                sentences = last_message.split('.')
+                if sentences and len(sentences[0]) > 10:
+                    title = sentences[0][:50] + "..."
+                elif len(last_message) > 10:
                     title = last_message[:30] + "..."
             
             # Find and update the conversation
@@ -351,7 +385,7 @@ Example format:
             if conversations:
                 conv_id = conversations[0]["id"]
                 update_data = {
-                    "updated_at": datetime.utcnow(),
+                    "updated_at": self._get_utc_now(),  # Use timezone-aware datetime
                     "title": title,
                     "message_count": conversations[0].get("message_count", 0) + 2  # +2 for user and AI message
                 }
@@ -460,14 +494,16 @@ Example format:
             }
     
     async def create_conversation_session(self, user_id: str) -> str:
-        """Create a new conversation session"""
+        """Create a new conversation session - FIXED DATETIME"""
         try:
             conversation_id = str(uuid.uuid4())
+            now = self._get_utc_now()
+            
             session_data = {
                 "user_id": user_id,
                 "conversation_id": conversation_id,
-                "created_at": datetime.utcnow(),
-                "updated_at": datetime.utcnow(),
+                "created_at": now,
+                "updated_at": now,
                 "message_count": 0,
                 "title": "New Chat",
                 "status": "active"
@@ -482,11 +518,12 @@ Example format:
             return str(uuid.uuid4())
     
     async def get_user_conversations(self, user_id: str) -> List[Dict[str, Any]]:
-        """Get user's conversation list with metadata"""
+        """Get user's conversation list with metadata - FIXED VERSION"""
         try:
             if not self.firebase_service:
                 return []
             
+            # Get conversations from top-level collection
             conversations = await self.firebase_service.query_documents(
                 "conversations",
                 filters=[("user_id", "==", user_id)],
@@ -494,10 +531,13 @@ Example format:
                 limit=50
             )
             
+            print(f"Found {len(conversations)} conversations for user {user_id}")
+            
             # Add recent message preview for each conversation
             for conv in conversations:
                 try:
-                    recent_message = await self.firebase_service.query_documents(
+                    # Get the most recent message for this conversation
+                    recent_messages = await self.firebase_service.query_documents(
                         "chat_history",
                         filters=[
                             ("user_id", "==", user_id),
@@ -507,39 +547,47 @@ Example format:
                         limit=1
                     )
                     
-                    if recent_message:
-                        conv["last_message"] = recent_message[0]["content"][:100] + "..."
-                        conv["last_message_at"] = recent_message[0]["timestamp"]
+                    if recent_messages and len(recent_messages) > 0:
+                        last_msg = recent_messages[0]["content"]
+                        conv["last_message"] = last_msg[:100] + "..." if len(last_msg) > 100 else last_msg
+                        conv["last_message_at"] = recent_messages[0]["timestamp"]
                     else:
                         conv["last_message"] = "Start chatting..."
-                        conv["last_message_at"] = conv["created_at"]
+                        conv["last_message_at"] = conv.get("created_at", datetime.utcnow())
+                        
                 except Exception as e:
-                    print(f"Error getting recent message for conversation: {e}")
+                    print(f"Error getting recent message for conversation {conv.get('conversation_id')}: {e}")
                     conv["last_message"] = "Start chatting..."
-                    conv["last_message_at"] = conv["created_at"]
+                    conv["last_message_at"] = conv.get("created_at", datetime.utcnow())
             
+            print(f"Returning {len(conversations)} conversations with message previews")
             return conversations
+            
         except Exception as e:
             print(f"Failed to get user conversations: {e}")
             return []
     
     async def get_conversation_messages(self, user_id: str, conversation_id: str) -> List[MessageHistory]:
-        """Get messages for a specific conversation"""
+        """Get messages for a specific conversation - FIXED VERSION"""
         try:
             if not self.firebase_service:
                 return []
             
+            # Get messages from top-level collection
             messages = await self.firebase_service.query_documents(
                 "chat_history",
                 filters=[
                     ("user_id", "==", user_id),
                     ("conversation_id", "==", conversation_id)
                 ],
-                order_by="timestamp",
+                order_by="timestamp",  # Ascending order for conversation view
                 limit=100
             )
             
+            print(f"Found {len(messages)} messages for conversation {conversation_id}")
+            
             return [MessageHistory(**msg) for msg in messages]
+            
         except Exception as e:
             print(f"Failed to get conversation messages: {e}")
             return []
@@ -580,33 +628,86 @@ Example format:
             return False
     
     async def get_user_chat_stats(self, user_id: str) -> Dict[str, Any]:
-        """Get user's chat statistics"""
+        """Get user's chat statistics - FIXED DATETIME VERSION"""
         try:
             if not self.firebase_service:
                 return {"total_conversations": 0, "total_messages": 0, "messages_today": 0}
             
-            # Count total conversations
-            total_conversations = await self.firebase_service.count_user_collection(
-                user_id, "conversations"
-            )
+            print(f"Getting chat stats for user: {user_id}")
             
-            # Count total messages
-            total_messages = await self.firebase_service.count_user_collection(
-                user_id, "chat_history"
+            # Count total conversations from top-level conversations collection
+            conversations = await self.firebase_service.query_documents(
+                "conversations",
+                filters=[("user_id", "==", user_id)]
             )
+            total_conversations = len(conversations)
+            print(f"Found {total_conversations} conversations")
             
-            # Count messages today
-            today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-            messages_today = await self.firebase_service.count_user_collection(
-                user_id, "chat_history", [("timestamp", ">=", today_start)]
+            # Count total messages from top-level chat_history collection
+            messages = await self.firebase_service.query_documents(
+                "chat_history",
+                filters=[("user_id", "==", user_id)]
             )
+            total_messages = len(messages)
+            print(f"Found {total_messages} total messages")
             
-            return {
+            # Count messages today - FIXED: Use timezone-aware datetime comparison
+            today_start = self._get_today_start_utc()
+            print(f"Today start (UTC): {today_start}")
+            
+            messages_today = 0
+            for message in messages:
+                try:
+                    msg_timestamp = message.get("timestamp")
+                    if msg_timestamp:
+                        # Normalize the message timestamp
+                        normalized_timestamp = self._normalize_datetime(msg_timestamp)
+                        
+                        # Now we can safely compare timezone-aware datetimes
+                        if normalized_timestamp >= today_start:
+                            messages_today += 1
+                except Exception as e:
+                    print(f"Error processing message timestamp: {e}")
+                    continue
+            
+            print(f"Found {messages_today} messages today")
+            
+            # Calculate last chat time
+            last_chat_at = None
+            if messages:
+                try:
+                    # Get the most recent message
+                    latest_messages = await self.firebase_service.query_documents(
+                        "chat_history",
+                        filters=[("user_id", "==", user_id)],
+                        order_by="-timestamp",
+                        limit=1
+                    )
+                    if latest_messages:
+                        last_timestamp = latest_messages[0].get("timestamp")
+                        last_chat_at = self._normalize_datetime(last_timestamp)
+                except Exception as e:
+                    print(f"Error getting last chat time: {e}")
+            
+            result = {
                 "total_conversations": total_conversations,
                 "total_messages": total_messages,
                 "messages_today": messages_today,
-                "avg_messages_per_conversation": round(total_messages / max(total_conversations, 1), 1)
+                "avg_messages_per_conversation": round(total_messages / max(total_conversations, 1), 1),
+                "last_chat_at": last_chat_at.isoformat() if last_chat_at else None
             }
+            
+            print(f"Returning chat stats: {result}")
+            return result
+            
         except Exception as e:
             print(f"Failed to get chat stats: {e}")
-            return {"total_conversations": 0, "total_messages": 0, "messages_today": 0}
+            import traceback
+            traceback.print_exc()
+            return {
+                "total_conversations": 0, 
+                "total_messages": 0, 
+                "messages_today": 0,
+                "avg_messages_per_conversation": 0.0,
+                "last_chat_at": None
+            }

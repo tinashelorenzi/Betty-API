@@ -260,17 +260,18 @@ class FirebaseService:
         order_by: Optional[str] = None,
         limit: Optional[int] = None
     ) -> List[Dict[str, Any]]:
-        """Query documents from Firestore with filters"""
+        """Query documents from Firestore with filters - FIXED VERSION"""
         try:
             if not self.db:
                 raise Exception("Firebase not initialized")
             
             query = self.db.collection(collection)
             
-            # Apply filters
+            # Apply filters using proper keyword argument syntax
             if filters:
                 for field, operator, value in filters:
-                    query = query.where(field, operator, value)
+                    # Use filter keyword argument instead of positional arguments
+                    query = query.where(filter=firestore.FieldFilter(field, operator, value))
             
             # Apply ordering
             if order_by:
@@ -385,15 +386,16 @@ class FirebaseService:
         order_by: str = None,
         limit: int = None
     ) -> List[Dict[str, Any]]:
-        """Query documents from user's subcollection"""
+        """Query documents from user's subcollection - FIXED VERSION"""
         try:
             collection_ref = self.get_user_collection_ref(uid, collection_name)
             query = collection_ref
             
-            # Apply where conditions
+            # Apply where conditions using proper syntax
             if where_conditions:
                 for field, operator, value in where_conditions:
-                    query = query.where(field, operator, value)
+                    # Use filter keyword argument
+                    query = query.where(filter=firestore.FieldFilter(field, operator, value))
             
             # Apply ordering
             if order_by:
@@ -447,15 +449,16 @@ class FirebaseService:
             return False
     
     async def count_user_collection(self, uid: str, collection_name: str, where_conditions: List[tuple] = None) -> int:
-        """Count documents in user's subcollection with optional conditions"""
+        """Count documents in user's subcollection with optional conditions - FIXED VERSION"""
         try:
             collection_ref = self.get_user_collection_ref(uid, collection_name)
             query = collection_ref
             
-            # Apply where conditions if provided
+            # Apply where conditions if provided using proper syntax
             if where_conditions:
                 for field, operator, value in where_conditions:
-                    query = query.where(field, operator, value)
+                    # Use filter keyword argument
+                    query = query.where(filter=firestore.FieldFilter(field, operator, value))
             
             # Count documents
             docs = query.stream()
