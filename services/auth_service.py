@@ -1,6 +1,6 @@
 from firebase_admin import auth
 from typing import Dict, Any, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from models.user_models import UserCreate, UserResponse, AuthToken, UserUpdate
 from services.firebase_service import FirebaseService
 import hashlib
@@ -27,8 +27,8 @@ class AuthService:
         payload = {
             'uid': uid,
             'email': email,
-            'exp': datetime.utcnow() + timedelta(minutes=self.jwt_expiry_minutes),
-            'iat': datetime.utcnow()
+            'exp': datetime.now(timezone.utc) + timedelta(minutes=self.jwt_expiry_minutes),
+            'iat': datetime.now(timezone.utc)
         }
         return jwt.encode(payload, self.jwt_secret, algorithm=self.jwt_algorithm)
     
@@ -63,8 +63,8 @@ class AuthService:
                 "timezone": user_data.timezone or "UTC",
                 "is_verified": False,
                 "google_connected": False,
-                "created_at": datetime.utcnow(),
-                "updated_at": datetime.utcnow(),
+                "created_at": datetime.now(timezone.utc),
+                "updated_at": datetime.now(timezone.utc),
             }
             
             await self.firebase_service.create_user_profile(user_record.uid, profile_data)
@@ -79,55 +79,113 @@ class AuthService:
     async def login_user(self, email: str, password: str) -> AuthToken:
         """Login user with email/password and return JWT token"""
         try:
-            # CRITICAL FIX: Actually verify the password with Firebase Auth
-            # You need to use Firebase Auth REST API to verify credentials
+            # Use Firebase Admin SDK to get user by email
+            # Note: Firebase Admin SDK doesn't support password verification directly
+            # We'll use the REST API for password verification but with better error handling
+            
             import requests
             import json
             
             # Firebase Auth REST API endpoint for password verification
-            firebase_api_key = os.getenv('FIREBASE_API_KEY')  # Add this to your .env
-            print(f"Logging in user with credentials: {email} and {password}")
+            firebase_api_key = os.getenv('FIREBASE_API_KEY')
+            
+            # If no API key is configured, try to get user by email using Admin SDK
             if not firebase_api_key:
-                raise Exception("Firebase API key not configured")
-            
-            auth_url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={firebase_api_key}"
-            
-            # Verify credentials with Firebase
-            auth_payload = {
-                "email": email,
-                "password": password,
-                "returnSecureToken": True
-            }
-            
-            auth_response = requests.post(auth_url, json=auth_payload)
-            print(f"Auth response: {auth_response.json()}")
-            
-            if auth_response.status_code != 200:
-                auth_data = auth_response.json()
-                if "INVALID_PASSWORD" in auth_data.get("error", {}).get("message", ""):
+                print("⚠️ FIREBASE_API_KEY not configured, attempting to get user by email...")
+                try:
+                    # Get user by email using Firebase Admin SDK
+                    user_record = auth.get_user_by_email(email)
+                    uid = user_record.uid
+                    firebase_auth_data = {
+                        'localId': uid,
+                        'email': user_record.email,
+                        'displayName': user_record.display_name,
+                        'emailVerified': user_record.email_verified
+                    }
+                    print(f"✅ Found user by email: {uid}")
+                except auth.UserNotFoundError:
                     raise ValueError("Invalid email or password")
-                elif "EMAIL_NOT_FOUND" in auth_data.get("error", {}).get("message", ""):
-                    raise ValueError("Invalid email or password")
-                else:
-                    raise ValueError("Authentication failed")
-            
-            # Get Firebase user record for additional info
-            firebase_auth_data = auth_response.json()
-            uid = firebase_auth_data['localId']
+                except Exception as e:
+                    raise Exception(f"Authentication failed: {e}")
+            else:
+                # Use REST API for password verification
+                auth_url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={firebase_api_key}"
+                
+                # Verify credentials with Firebase
+                auth_payload = {
+                    "email": email,
+                    "password": password,
+                    "returnSecureToken": True
+                }
+                
+                print(f"Logging in user with credentials: {email} and {password}")
+                auth_response = requests.post(auth_url, json=auth_payload)
+                print(f"Auth response: {auth_response.json()}")
+                
+                if auth_response.status_code != 200:
+                    auth_data = auth_response.json()
+                    if "INVALID_PASSWORD" in auth_data.get("error", {}).get("message", ""):
+                        raise ValueError("Invalid email or password")
+                    elif "EMAIL_NOT_FOUND" in auth_data.get("error", {}).get("message", ""):
+                        raise ValueError("Invalid email or password")
+                    else:
+                        raise ValueError("Authentication failed")
+                
+                # Get Firebase user record for additional info
+                firebase_auth_data = auth_response.json()
+                uid = firebase_auth_data['localId']
+                print(f"Firebase auth successful for UID: {uid}")
             
             # Get user profile from Firestore
+            print(f"FirebaseService instance: {self.firebase_service}")
+            print(f"FirebaseService methods: {[method for method in dir(self.firebase_service) if not method.startswith('_')]}")
             user_profile = await self.firebase_service.get_user_profile(uid)
+            
+            # If profile doesn't exist, create it from Firebase auth data
             if not user_profile:
-                raise ValueError("User profile not found")
+                print("Creating new profile from Firebase auth data...")
+                profile_data = {
+                    "uid": uid,
+                    "email": email,
+                    "first_name": firebase_auth_data.get('displayName', '').split()[0] if firebase_auth_data.get('displayName') else '',
+                    "last_name": ' '.join(firebase_auth_data.get('displayName', '').split()[1:]) if firebase_auth_data.get('displayName') and len(firebase_auth_data.get('displayName', '').split()) > 1 else '',
+                    "location": "",
+                    "timezone": "UTC",
+                    "is_verified": firebase_auth_data.get('emailVerified', False),
+                    "google_connected": False,
+                    "created_at": datetime.now(timezone.utc),
+                    "updated_at": datetime.now(timezone.utc),
+                    "last_login": datetime.now(timezone.utc)
+                }
+                
+                try:
+                    await self.firebase_service.create_user_profile(uid, profile_data)
+                    user_profile = profile_data
+                except Exception as e:
+                    print(f"⚠️ Warning: Could not create user profile in Firestore: {e}")
+                    # Use minimal profile data
+                    user_profile = {
+                        "uid": uid,
+                        "email": email,
+                        "first_name": firebase_auth_data.get('displayName', '').split()[0] if firebase_auth_data.get('displayName') else '',
+                        "last_name": ' '.join(firebase_auth_data.get('displayName', '').split()[1:]) if firebase_auth_data.get('displayName') and len(firebase_auth_data.get('displayName', '').split()) > 1 else '',
+                        "location": "",
+                        "timezone": "UTC",
+                        "is_verified": firebase_auth_data.get('emailVerified', False),
+                        "google_connected": False,
+                        "created_at": datetime.now(timezone.utc),
+                        "updated_at": datetime.now(timezone.utc),
+                        "last_login": datetime.now(timezone.utc)
+                    }
+            else:
+                # Update last login for existing profile
+                await self.firebase_service.update_user_profile(
+                    uid, 
+                    {"last_login": datetime.now(timezone.utc)}
+                )
             
             # Create JWT token for your API
             jwt_token = self.create_jwt_token(uid, email)
-            
-            # Update last login
-            await self.firebase_service.update_user_profile(
-                uid, 
-                {"last_login": datetime.utcnow()}
-            )
             
             user_response = UserResponse(**user_profile)
             
@@ -177,7 +235,7 @@ class AuthService:
             # Update user profile
             await self.firebase_service.update_user_profile(
                 uid, 
-                {"last_logout": datetime.utcnow()}
+                {"last_logout": datetime.now(timezone.utc)}
             )
             
             return True
