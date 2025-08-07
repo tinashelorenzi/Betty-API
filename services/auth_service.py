@@ -11,6 +11,7 @@ class AuthService:
     
     def __init__(self, firebase_service: FirebaseService):
         self.firebase_service = firebase_service
+        self.jwt_secret = secrets.token_urlsafe(32)
     
     async def create_user(self, user_data: UserCreate) -> UserResponse:
         """Create a new user account"""
@@ -54,26 +55,16 @@ class AuthService:
         except Exception as e:
             raise Exception(f"Failed to create user: {e}")
     
-    async def login_user(self, email: str, password: str) -> AuthToken:
-        """Login user and return custom token"""
+    async def login_user(self, email: str, password: str) -> Dict[str, Any]:
+        """Login user - Return instructions for client-side Firebase Auth"""
         try:
-            # Get user by email
+            # Verify user exists in Firebase Auth
             user_record = auth.get_user_by_email(email)
-            
-            # Note: Firebase Admin SDK doesn't directly verify passwords
-            # In a real app, you'd use Firebase Auth REST API or client SDK
-            # For now, we'll create a custom token assuming password is correct
             
             # Get user profile from Firestore
             user_profile = await self.firebase_service.get_user_profile(user_record.uid)
             if not user_profile:
                 raise ValueError("User profile not found")
-            
-            # Create custom token
-            custom_token = self.firebase_service.create_custom_token(
-                user_record.uid,
-                {"email": email, "verified": user_record.email_verified}
-            )
             
             # Update last login
             await self.firebase_service.update_user_profile(
@@ -81,25 +72,24 @@ class AuthService:
                 {"last_login": datetime.utcnow()}
             )
             
-            user_response = UserResponse(**user_profile)
-            
-            return AuthToken(
-                access_token=custom_token.decode('utf-8'),
-                token_type="bearer",
-                expires_in=3600,  # 1 hour
-                user=user_response
-            )
+            # Return success - client should handle Firebase Auth
+            return {
+                "message": "User verified - complete login on client",
+                "uid": user_record.uid,
+                "email": user_record.email,
+                "user": UserResponse(**user_profile)
+            }
             
         except auth.UserNotFoundError:
             raise ValueError("User not found")
         except Exception as e:
             raise Exception(f"Login failed: {e}")
     
-    async def verify_token(self, token: str) -> Dict[str, Any]:
+    async def verify_token(self, id_token: str) -> Dict[str, Any]:
         """Verify Firebase ID token and return user data"""
         try:
-            # Verify token
-            decoded_token = self.firebase_service.verify_token(token)
+            # Verify ID token (not custom token!)
+            decoded_token = auth.verify_id_token(id_token)
             uid = decoded_token['uid']
             
             # Get user profile

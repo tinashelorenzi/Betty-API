@@ -115,7 +115,7 @@ async def register_user(user_data: UserCreate):
 
 @app.post("/auth/login")
 async def login_user(email: str, password: str):
-    """Login user and return custom token"""
+    """Verify user exists - client handles Firebase Auth"""
     try:
         result = await auth_service.login_user(email, password)
         return result
