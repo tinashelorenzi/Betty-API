@@ -79,6 +79,8 @@ class AuthService:
     async def login_user(self, email: str, password: str) -> AuthToken:
         """Login user with email/password and return JWT token"""
         try:
+            print(f"🔄 Starting login process for: {email}")
+            
             # Use Firebase Admin SDK to get user by email
             # Note: Firebase Admin SDK doesn't support password verification directly
             # We'll use the REST API for password verification but with better error handling
@@ -104,8 +106,10 @@ class AuthService:
                     }
                     print(f"✅ Found user by email: {uid}")
                 except auth.UserNotFoundError:
+                    print(f"❌ User not found in Firebase Auth: {email}")
                     raise ValueError("Invalid email or password")
                 except Exception as e:
+                    print(f"❌ Firebase Admin SDK error: {e}")
                     raise Exception(f"Authentication failed: {e}")
             else:
                 # Use REST API for password verification
@@ -118,12 +122,12 @@ class AuthService:
                     "returnSecureToken": True
                 }
                 
-                print(f"Logging in user with credentials: {email} and {password}")
+                print(f"🔑 Logging in user with credentials: {email}")
                 auth_response = requests.post(auth_url, json=auth_payload)
-                print(f"Auth response: {auth_response.json()}")
                 
                 if auth_response.status_code != 200:
                     auth_data = auth_response.json()
+                    print(f"❌ Firebase auth failed: {auth_data}")
                     if "INVALID_PASSWORD" in auth_data.get("error", {}).get("message", ""):
                         raise ValueError("Invalid email or password")
                     elif "EMAIL_NOT_FOUND" in auth_data.get("error", {}).get("message", ""):
@@ -134,16 +138,25 @@ class AuthService:
                 # Get Firebase user record for additional info
                 firebase_auth_data = auth_response.json()
                 uid = firebase_auth_data['localId']
-                print(f"Firebase auth successful for UID: {uid}")
+                print(f"✅ Firebase auth successful for UID: {uid}")
             
             # Get user profile from Firestore
-            print(f"FirebaseService instance: {self.firebase_service}")
-            print(f"FirebaseService methods: {[method for method in dir(self.firebase_service) if not method.startswith('_')]}")
-            user_profile = await self.firebase_service.get_user_profile(uid)
+            print(f"🔍 Attempting to get user profile for UID: {uid}")
+            print(f"🔧 FirebaseService instance: {self.firebase_service}")
+            print(f"🔧 FirebaseService methods: {[method for method in dir(self.firebase_service) if not method.startswith('_')]}")
+            
+            try:
+                user_profile = await self.firebase_service.get_user_profile(uid)
+                print(f"📋 User profile result: {user_profile}")
+            except Exception as profile_error:
+                print(f"❌ Error getting user profile: {profile_error}")
+                print(f"❌ Profile error type: {type(profile_error)}")
+                # Don't fail the login, create a minimal profile instead
+                user_profile = None
             
             # If profile doesn't exist, create it from Firebase auth data
             if not user_profile:
-                print("Creating new profile from Firebase auth data...")
+                print("🆕 Creating new profile from Firebase auth data...")
                 profile_data = {
                     "uid": uid,
                     "email": email,
@@ -161,45 +174,51 @@ class AuthService:
                 try:
                     await self.firebase_service.create_user_profile(uid, profile_data)
                     user_profile = profile_data
+                    print("✅ Created new user profile in Firestore")
                 except Exception as e:
                     print(f"⚠️ Warning: Could not create user profile in Firestore: {e}")
-                    # Use minimal profile data
-                    user_profile = {
-                        "uid": uid,
-                        "email": email,
-                        "first_name": firebase_auth_data.get('displayName', '').split()[0] if firebase_auth_data.get('displayName') else '',
-                        "last_name": ' '.join(firebase_auth_data.get('displayName', '').split()[1:]) if firebase_auth_data.get('displayName') and len(firebase_auth_data.get('displayName', '').split()) > 1 else '',
-                        "location": "",
-                        "timezone": "UTC",
-                        "is_verified": firebase_auth_data.get('emailVerified', False),
-                        "google_connected": False,
-                        "created_at": datetime.now(timezone.utc),
-                        "updated_at": datetime.now(timezone.utc),
-                        "last_login": datetime.now(timezone.utc)
-                    }
+                    # Use minimal profile data for JWT token creation
+                    user_profile = profile_data  # Use the profile_data even if Firestore save failed
             else:
                 # Update last login for existing profile
-                await self.firebase_service.update_user_profile(
-                    uid, 
-                    {"last_login": datetime.now(timezone.utc)}
-                )
+                try:
+                    await self.firebase_service.update_user_profile(
+                        uid, 
+                        {"last_login": datetime.now(timezone.utc)}
+                    )
+                    print("✅ Updated last login timestamp")
+                except Exception as e:
+                    print(f"⚠️ Warning: Could not update last login: {e}")
             
+            print(f"🔑 Creating JWT token for UID: {uid}")
             # Create JWT token for your API
             jwt_token = self.create_jwt_token(uid, email)
             
+            print(f"👤 Creating UserResponse object...")
+            # Create UserResponse object
             user_response = UserResponse(**user_profile)
             
-            return AuthToken(
+            print(f"🎟️ Creating AuthToken response...")
+            # Return AuthToken with all required fields
+            auth_token = AuthToken(
                 access_token=jwt_token,
                 token_type="bearer",
                 expires_in=self.jwt_expiry_minutes * 60,  # Convert to seconds
                 user=user_response
             )
             
+            print(f"✅ Login successful! Returning auth token")
+            return auth_token
+            
         except ValueError as ve:
             # Re-raise validation errors as-is
+            print(f"❌ Validation error during login: {ve}")
             raise ve
         except Exception as e:
+            print(f"❌ Unexpected error during login: {e}")
+            print(f"❌ Error type: {type(e)}")
+            import traceback
+            print(f"❌ Full traceback: {traceback.format_exc()}")
             raise Exception(f"Login failed: {e}")
     
     async def verify_token(self, token: str) -> Dict[str, Any]:
