@@ -58,9 +58,8 @@ class UserLogin(BaseModel):
     password: str
 
 class AuthToken(BaseModel):
-    """Model for authentication token response"""
     access_token: str
-    token_type: str = "bearer"
+    token_type: str
     expires_in: int
     user: UserResponse
 
@@ -130,3 +129,7 @@ class UserPreferences(BaseModel):
     auto_save: bool = True
     analytics_enabled: bool = True
     updated_at: Optional[datetime] = None
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str

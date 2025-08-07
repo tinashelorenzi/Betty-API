@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 import uvicorn
 from typing import Optional
 import os
+import jwt
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -35,6 +36,8 @@ document_service = DocumentService(firebase_service, google_service)
 ai_service = AIService(firebase_service)
 planner_service = PlannerService(firebase_service)
 profile_service = ProfileService(firebase_service, auth_service)
+
+security = HTTPBearer()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -79,10 +82,11 @@ app.add_middleware(
 security = HTTPBearer()
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """Dependency to get current authenticated user"""
+    """Get current user from JWT token"""
     try:
-        user = await auth_service.verify_token(credentials.credentials)
-        return user
+        token = credentials.credentials
+        user_data = await auth_service.verify_token(token)
+        return user_data
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
