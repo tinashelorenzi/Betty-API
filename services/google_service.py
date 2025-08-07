@@ -126,33 +126,45 @@ class GoogleService:
             raise Exception(f"OAuth callback failed: {e}")
     
     async def get_user_credentials(self, user_id: str) -> Optional[Credentials]:
-        """Get and refresh user's Google credentials"""
+        """Get user's stored Google credentials"""
         try:
-            # Get stored tokens
+            # Get tokens from Firebase
             tokens_doc = await self.firebase_service.get_document("google_tokens", user_id)
+            
             if not tokens_doc:
                 return None
             
             # Create credentials object
             credentials = Credentials(
-                token=tokens_doc["access_token"],
-                refresh_token=tokens_doc["refresh_token"],
-                token_uri=tokens_doc["token_uri"],
-                client_id=tokens_doc["client_id"],
-                client_secret=tokens_doc["client_secret"],
-                scopes=tokens_doc["scopes"]
+                token=tokens_doc.get("access_token"),
+                refresh_token=tokens_doc.get("refresh_token"),
+                token_uri=tokens_doc.get("token_uri"),
+                client_id=tokens_doc.get("client_id"),
+                client_secret=tokens_doc.get("client_secret"),
+                scopes=tokens_doc.get("scopes")
             )
             
-            # Refresh if expired
-            if credentials.expired:
+            # Set expiry if available
+            if tokens_doc.get("expiry"):
+                from datetime import datetime
+                credentials.expiry = datetime.fromisoformat(tokens_doc["expiry"])
+            
+            # Refresh if needed
+            if credentials.expired and credentials.refresh_token:
                 credentials.refresh(Request())
                 
                 # Update stored tokens
-                await self.firebase_service.update_document("google_tokens", user_id, {
+                updated_tokens = {
                     "access_token": credentials.token,
                     "expiry": credentials.expiry.isoformat() if credentials.expiry else None,
-                    "refreshed_at": datetime.utcnow()
-                })
+                    "updated_at": datetime.utcnow()
+                }
+                
+                await self.firebase_service.update_document(
+                    "google_tokens", 
+                    user_id, 
+                    updated_tokens
+                )
             
             return credentials
             
@@ -161,9 +173,19 @@ class GoogleService:
             return None
     
     async def disconnect_google_account(self, user_id: str) -> bool:
-        """Disconnect user's Google account"""
+        """Disconnect and revoke Google account access"""
         try:
-            # Delete stored tokens
+            # Get current credentials
+            credentials = await self.get_user_credentials(user_id)
+            
+            if credentials and credentials.token:
+                # Revoke the token
+                revoke_url = f"https://oauth2.googleapis.com/revoke?token={credentials.token}"
+                import requests
+                response = requests.post(revoke_url)
+                print(f"Token revocation response: {response.status_code}")
+            
+            # Remove tokens from Firebase
             await self.firebase_service.delete_document("google_tokens", user_id)
             
             # Update user profile
@@ -178,7 +200,8 @@ class GoogleService:
             return True
             
         except Exception as e:
-            raise Exception(f"Failed to disconnect Google account: {e}")
+            print(f"Failed to disconnect Google account: {e}")
+            return False
     
     # ========================================================================
     # GOOGLE DOCS API
@@ -190,25 +213,25 @@ class GoogleService:
         title: str, 
         content: str
     ) -> Dict[str, Any]:
-        """Create a Google Doc in user's Drive"""
+        """Create a new Google Document"""
         try:
             credentials = await self.get_user_credentials(user_id)
             if not credentials:
                 raise ValueError("Google account not connected")
             
-            # Create document
             docs_service = build('docs', 'v1', credentials=credentials)
+            drive_service = build('drive', 'v3', credentials=credentials)
             
-            # Create empty document
-            document = {
+            # Create the document
+            doc = {
                 'title': title
             }
-            doc = docs_service.documents().create(body=document).execute()
-            document_id = doc.get('documentId')
             
-            # Add content to document
+            document = docs_service.documents().create(body=doc).execute()
+            document_id = document.get('documentId')
+            
+            # Add content to the document
             if content.strip():
-                # Convert content to Google Docs format
                 requests = [
                     {
                         'insertText': {
@@ -225,14 +248,19 @@ class GoogleService:
                     body={'requests': requests}
                 ).execute()
             
-            # Get document URL
-            doc_url = f"https://docs.google.com/document/d/{document_id}/edit"
+            # Get the document URL
+            file_info = drive_service.files().get(
+                fileId=document_id,
+                fields="webViewLink,webContentLink"
+            ).execute()
             
             return {
                 "document_id": document_id,
-                "document_url": doc_url,
+                "document_url": file_info.get("webViewLink"),
+                "download_url": file_info.get("webContentLink"),
                 "title": title,
-                "created_at": datetime.utcnow().isoformat()
+                "created_at": datetime.utcnow().isoformat(),
+                "success": True
             }
             
         except HttpError as e:
@@ -246,7 +274,7 @@ class GoogleService:
         document_id: str, 
         content: str
     ) -> Dict[str, Any]:
-        """Update existing Google Doc"""
+        """Update an existing Google Document"""
         try:
             credentials = await self.get_user_credentials(user_id)
             if not credentials:

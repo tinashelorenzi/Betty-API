@@ -10,6 +10,9 @@ import jwt
 from datetime import datetime
 from fastapi import Query
 from dotenv import load_dotenv
+import json
+from fastapi.responses import HTMLResponse
+from datetime import datetime, timezone
 
 # Load environment variables from .env file
 load_dotenv()
@@ -379,9 +382,72 @@ async def google_oauth_callback(code: str, state: str):
     """Handle Google OAuth callback"""
     try:
         result = await google_service.handle_oauth_callback(code, state)
-        return result
+        
+        # Return HTML page that closes the browser and sends message back to React Native
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Google Authentication</title>
+        </head>
+        <body>
+            <script>
+                // For React Native WebView
+                if (window.ReactNativeWebView) {{
+                    window.ReactNativeWebView.postMessage(JSON.stringify({{
+                        type: 'GOOGLE_AUTH_SUCCESS',
+                        data: {json.dumps(result)}
+                    }}));
+                }}
+                // For regular browser
+                else {{
+                    window.opener && window.opener.postMessage({{
+                        type: 'GOOGLE_AUTH_SUCCESS',
+                        data: {json.dumps(result)}
+                    }}, '*');
+                    window.close();
+                }}
+            </script>
+            <h1>Authentication Successful!</h1>
+            <p>You can now close this window.</p>
+        </body>
+        </html>
+        """
+        
+        return HTMLResponse(content=html_content)
+        
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        error_html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Google Authentication Error</title>
+        </head>
+        <body>
+            <script>
+                // For React Native WebView
+                if (window.ReactNativeWebView) {{
+                    window.ReactNativeWebView.postMessage(JSON.stringify({{
+                        type: 'GOOGLE_AUTH_ERROR',
+                        error: '{str(e)}'
+                    }}));
+                }}
+                // For regular browser
+                else {{
+                    window.opener && window.opener.postMessage({{
+                        type: 'GOOGLE_AUTH_ERROR',
+                        error: '{str(e)}'
+                    }}, '*');
+                    window.close();
+                }}
+            </script>
+            <h1>Authentication Failed</h1>
+            <p>Error: {str(e)}</p>
+        </body>
+        </html>
+        """
+        return HTMLResponse(content=error_html, status_code=400)
+
 
 @app.post("/auth/google/disconnect")
 async def disconnect_google_account(user=Depends(get_current_user)):
@@ -400,6 +466,80 @@ async def get_google_connection_status(user=Depends(get_current_user)):
         return status
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# GOOGLE DRIVE/DOCS ROUTES
+# ============================================================================
+
+@app.post("/google/create-doc")
+async def create_google_doc(
+    request: dict,
+    user=Depends(get_current_user)
+):
+    """Create a Google Doc with the provided content"""
+    try:
+        title = request.get("title", "Untitled Document")
+        content = request.get("content", "")
+        
+        result = await google_service.create_google_doc(
+            user["uid"], 
+            title, 
+            content
+        )
+        
+        return {
+            "success": True,
+            "document_id": result["document_id"],
+            "document_url": result["document_url"],
+            "title": title,
+            "message": "Document created successfully in Google Drive"
+        }
+        
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400, 
+            detail="Google account not connected. Please connect your Google account first."
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/google/drive/files")
+async def list_drive_files(user=Depends(get_current_user)):
+    """List user's Google Drive files"""
+    try:
+        files = await google_service.list_user_drive_files(user["uid"])
+        return {"files": files}
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400, 
+            detail="Google account not connected"
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/google/calendar/events")
+async def get_calendar_events(
+    start_date: str,
+    end_date: str,
+    user=Depends(get_current_user)
+):
+    """Get user's calendar events"""
+    try:
+        events = await google_service.get_calendar_events(
+            user["uid"], 
+            start_date, 
+            end_date
+        )
+        return {"events": events}
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400, 
+            detail="Google account not connected"
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 
 # ============================================================================
 # CHAT/AI ROUTES
