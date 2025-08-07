@@ -27,7 +27,7 @@ from models.user_models import (
     NotificationSettings, UserPreferences
 )
 from models.document_models import DocumentCreate, DocumentResponse, DocumentUpdate
-from models.chat_models import ChatMessage, ChatResponse
+from models.chat_models import ChatMessage, ChatResponse, EnhancedChatResponse
 from models.planner_models import TaskCreate, TaskResponse, TaskUpdate, NoteCreate, NoteResponse
 
 # Initialize services
@@ -407,7 +407,7 @@ async def get_google_connection_status(user=Depends(get_current_user)):
 
 # main.py - Fixed chat message endpoint
 
-@app.post("/chat/message", response_model=ChatResponse)
+@app.post("/chat/message", response_model=EnhancedChatResponse)
 async def send_chat_message(
     message: ChatMessage,
     conversation_id: Optional[str] = Query(None, description="Optional conversation ID"),
@@ -431,12 +431,11 @@ async def send_chat_message(
         response = await ai_service.process_message(message, user_id, conversation_id)
         
         # Enhanced: Save messages and update indexes automatically
-        await save_chat_messages_with_indexes(
+        await firebase_service.save_chat_messages_with_indexes(
             user_id=user_id,
             conversation_id=conversation_id,
             user_message=message.content,
             ai_response=response.content,
-            tokens_used=response.tokens_used
         )
         
         # If AI created a document, save it with indexing

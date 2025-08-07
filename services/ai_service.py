@@ -9,7 +9,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 
-from models.chat_models import ChatMessage, ChatResponse, MessageHistory, MessageRole, MessageType, AIContext
+from models.chat_models import ChatMessage, ChatResponse, MessageHistory, MessageRole, MessageType, AIContext, EnhancedChatResponse
 from services.firebase_service import FirebaseService
 
 class AIService:
@@ -68,7 +68,7 @@ class AIService:
             # Use fallback mock response for development
             self.model = None
     
-    async def process_message(self, message: ChatMessage, user_id: str, conversation_id: Optional[str] = None) -> ChatResponse:
+    async def process_message(self, message: ChatMessage, user_id: str, conversation_id: Optional[str] = None) -> EnhancedChatResponse:
         """Process user message and return AI response with conversation context - FIXED VERSION"""
         try:
             start_time = time.time()
@@ -101,8 +101,8 @@ class AIService:
                     user_id, message.content, response, processing_time, conversation_id
                 )
             
-            # Return complete ChatResponse with all fields
-            return ChatResponse(
+            # Return complete EnhancedChatResponse with all fields
+            return EnhancedChatResponse(
                 content=parsed_response["content"],
                 message_type=MessageType(parsed_response.get("message_type", "text")),
                 document_created=parsed_response.get("document_created", False),
@@ -115,15 +115,17 @@ class AIService:
                 event_data=parsed_response.get("event_data"),
                 processing_time=processing_time,
                 tokens_used=parsed_response.get("tokens_used"),
-                confidence_score=parsed_response.get("confidence_score", 0.9)
+                confidence_score=parsed_response.get("confidence_score", 0.9),
+                conversation_id=conversation_id
             )
             
         except Exception as e:
             print(f"Error in process_message: {e}")
-            return ChatResponse(
+            return EnhancedChatResponse(
                 content=f"I apologize, but I'm having trouble processing your request right now. Error: {str(e)}",
                 message_type=MessageType.TEXT,
-                processing_time=time.time() - start_time if 'start_time' in locals() else 0
+                processing_time=time.time() - start_time if 'start_time' in locals() else 0,
+                conversation_id=conversation_id
             )
     
     async def _generate_ai_response(self, prompt: str) -> str:
@@ -1014,7 +1016,7 @@ class SmartDocumentDecisionMixin:
 class EnhancedAIService(AIService, SmartDocumentDecisionMixin):
     """Enhanced AI Service with intelligent document creation"""
     
-    async def process_message(self, message: ChatMessage, user_id: str, conversation_id: Optional[str] = None) -> ChatResponse:
+    async def process_message(self, message: ChatMessage, user_id: str, conversation_id: Optional[str] = None) -> EnhancedChatResponse:
         """Process user message with smart document creation decisions"""
         try:
             start_time = time.time()
@@ -1059,7 +1061,7 @@ class EnhancedAIService(AIService, SmartDocumentDecisionMixin):
                     user_id, message.content, response, processing_time, conversation_id
                 )
             
-            return ChatResponse(
+            return EnhancedChatResponse(
                 content=parsed_response["content"],
                 message_type=MessageType(parsed_response.get("message_type", "text")),
                 document_created=parsed_response.get("document_created", False),
@@ -1072,15 +1074,17 @@ class EnhancedAIService(AIService, SmartDocumentDecisionMixin):
                 event_data=parsed_response.get("event_data"),
                 processing_time=processing_time,
                 tokens_used=parsed_response.get("tokens_used"),
-                confidence_score=parsed_response.get("confidence_score", 0.9)
+                confidence_score=parsed_response.get("confidence_score", 0.9),
+                conversation_id=conversation_id
             )
             
         except Exception as e:
             print(f"Error in enhanced process_message: {e}")
-            return ChatResponse(
+            return EnhancedChatResponse(
                 content=f"I apologize, but I'm having trouble processing your request right now. Error: {str(e)}",
                 message_type=MessageType.TEXT,
-                processing_time=time.time() - start_time if 'start_time' in locals() else 0
+                processing_time=time.time() - start_time if 'start_time' in locals() else 0,
+                conversation_id=conversation_id
             )
     
     def _build_enhanced_system_prompt(self, context: AIContext, should_create_doc: bool, doc_type: str) -> str:

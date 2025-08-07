@@ -34,6 +34,7 @@ class ChatResponse(BaseModel):
     document_title: Optional[str] = None
     document_content: Optional[str] = None
     document_type: Optional[str] = None
+    document_id: Optional[str] = None
     
     # Task creation fields
     task_created: bool = False
