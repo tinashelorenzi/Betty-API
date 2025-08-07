@@ -707,6 +707,28 @@ async def get_document(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/auth/google/mobile-callback")
+async def google_mobile_oauth_callback(
+    request: dict,
+    user=Depends(get_current_user)
+):
+    """Handle Google OAuth callback from mobile app"""
+    try:
+        code = request.get("code")
+        redirect_uri = request.get("redirect_uri")
+        
+        if not code:
+            raise HTTPException(status_code=400, detail="Authorization code not provided")
+        
+        # Use the google_service to handle the OAuth callback
+        # but modify it to use the mobile redirect_uri
+        result = await google_service.handle_mobile_oauth_callback(code, user["uid"], redirect_uri)
+        
+        return result
+        
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
 @app.put("/documents/{document_id}", response_model=DocumentResponse)
 async def update_document(
     document_id: str,

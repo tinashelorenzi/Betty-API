@@ -172,6 +172,74 @@ class GoogleService:
             print(f"Failed to get user credentials: {e}")
             return None
     
+    async def handle_mobile_oauth_callback(self, code: str, user_id: str, redirect_uri: str) -> Dict[str, Any]:
+        """Handle OAuth callback from mobile app with custom redirect URI"""
+        try:
+            flow = Flow.from_client_config(
+                {
+                    "web": {
+                        "client_id": self.client_id,
+                        "client_secret": self.client_secret,
+                        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                        "token_uri": "https://oauth2.googleapis.com/token",
+                        "redirect_uris": [redirect_uri]
+                    }
+                },
+                scopes=self.scopes
+            )
+            flow.redirect_uri = redirect_uri
+            
+            # Exchange code for tokens
+            flow.fetch_token(code=code)
+            credentials = flow.credentials
+            
+            # Get user info from Google
+            user_info_service = build('oauth2', 'v2', credentials=credentials)
+            user_info = user_info_service.userinfo().get().execute()
+            
+            # Store tokens in Firebase
+            tokens_data = {
+                "access_token": credentials.token,
+                "refresh_token": credentials.refresh_token,
+                "token_uri": credentials.token_uri,
+                "client_id": credentials.client_id,
+                "client_secret": credentials.client_secret,
+                "scopes": credentials.scopes,
+                "expiry": credentials.expiry.isoformat() if credentials.expiry else None,
+                "google_user_info": user_info,
+                "connected_at": datetime.utcnow(),
+                "connection_type": "mobile"
+            }
+            
+            await self.firebase_service.create_document(
+                "google_tokens", 
+                tokens_data, 
+                doc_id=user_id
+            )
+            
+            # Update user profile
+            await self.firebase_service.update_user_profile(user_id, {
+                "google_connected": True,
+                "google_email": user_info.get("email"),
+                "google_name": user_info.get("name"),
+                "google_picture": user_info.get("picture"),
+                "google_connected_at": datetime.utcnow()
+            })
+            
+            return {
+                "success": True,
+                "user_info": {
+                    "email": user_info.get("email"),
+                    "name": user_info.get("name"),
+                    "picture": user_info.get("picture")
+                },
+                "message": "Google account connected successfully"
+            }
+            
+        except Exception as e:
+            print(f"Failed to handle mobile OAuth callback: {e}")
+            raise Exception(f"Failed to complete Google authentication: {e}")
+    
     async def disconnect_google_account(self, user_id: str) -> bool:
         """Disconnect and revoke Google account access"""
         try:
