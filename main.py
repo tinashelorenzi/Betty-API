@@ -7,6 +7,7 @@ import uvicorn
 from typing import Optional
 import os
 import jwt
+from datetime import datetime
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -92,6 +93,48 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid authentication credentials",
             headers={"WWW-Authenticate": "Bearer"},
+        )
+
+async def get_admin_user(current_user = Depends(get_current_user)):
+    """Ensure the current user has admin privileges"""
+    try:
+        # Check if user is admin (you might have an 'is_admin' field or specific admin UIDs)
+        user_profile = await firebase_service.get_user_profile(current_user["uid"])
+        
+        if not user_profile:
+            raise HTTPException(status_code=403, detail="User profile not found")
+        
+        # Method 1: Check for admin flag
+        if user_profile.get("is_admin", False):
+            return current_user
+        
+        # Method 2: Check for specific admin UIDs (more secure)
+        ADMIN_UIDS = [
+            "your-admin-uid-1",  # Replace with your actual admin UID
+            "your-admin-uid-2",  # Add more admin UIDs as needed
+        ]
+        
+        if current_user["uid"] in ADMIN_UIDS:
+            return current_user
+        
+        # Method 3: Check for admin email domains
+        admin_email_domains = ["@yourdomain.com"]  # Replace with your domain
+        user_email = current_user.get("email", "")
+        
+        if any(user_email.endswith(domain) for domain in admin_email_domains):
+            return current_user
+        
+        raise HTTPException(
+            status_code=403, 
+            detail="Admin access required for this operation"
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Admin verification failed: {str(e)}"
         )
 
 # Health check
@@ -320,20 +363,47 @@ async def send_chat_message(
     message: ChatMessage,
     user=Depends(get_current_user)
 ):
-    """Send message to Betty AI and get response"""
+    """Send message to Betty AI and get response - ENHANCED WITH INDEXING"""
     try:
-        response = await ai_service.process_message(message, user["uid"])
+        user_id = user["uid"]
         
-        # If AI created a document, save it
+        # Get or create conversation - using indexed approach
+        if not message.conversation_id:
+            conversation_id = await ai_service.create_conversation_session_indexed(user_id)
+            message.conversation_id = conversation_id
+        else:
+            conversation_id = message.conversation_id
+        
+        # Process message with AI (existing logic)
+        response = await ai_service.process_message(message, user_id)
+        
+        # Enhanced: Save messages and update indexes automatically
+        await save_chat_messages_with_indexes(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            user_message=message.content,
+            ai_response=response.content,
+            tokens_used=response.tokens_used
+        )
+        
+        # If AI created a document, save it with indexing
         if response.document_created:
             doc_data = DocumentCreate(
                 title=response.document_title,
                 content=response.document_content,
                 document_type="ai_generated"
             )
-            await document_service.create_document(doc_data, user["uid"])
+            # Use indexed document creation
+            doc_id = await firebase_service.create_document_with_index(
+                collection="documents",
+                data=doc_data.dict(),
+                user_id=user_id,
+                index_type="document_ids"
+            )
+            response.document_id = doc_id
         
         return response
+        
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -342,12 +412,26 @@ async def get_chat_history(
     limit: int = 50,
     user=Depends(get_current_user)
 ):
-    """Get user's chat history"""
+    """Get user's chat history - ENHANCED PERFORMANCE"""
     try:
-        history = await ai_service.get_chat_history(user["uid"], limit)
+        # Same API, but now using optimized queries
+        history = await ai_service.get_chat_history_optimized(user["uid"], limit)
         return {"messages": history}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/chat/conversations")
+async def get_user_conversations(
+    user=Depends(get_current_user)
+):
+    """Get user's conversation list - MUCH FASTER WITH INDEXING"""
+    try:
+        # Same API signature, but now using indexed approach for speed
+        conversations = await ai_service.get_user_conversations_indexed(user["uid"])
+        return {"conversations": conversations}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # ============================================================================
 # DOCUMENT ROUTES
@@ -358,19 +442,40 @@ async def create_document(
     document: DocumentCreate,
     user=Depends(get_current_user)
 ):
-    """Create a new document"""
+    """Create a new document - WITH AUTOMATIC INDEXING"""
     try:
-        new_document = await document_service.create_document(document, user["uid"])
-        return new_document
+        # Create document with automatic index update
+        doc_id = await firebase_service.create_document_with_index(
+            collection="documents",
+            data=document.dict(),
+            user_id=user["uid"],
+            index_type="document_ids"
+        )
+        
+        # Return the document in expected format
+        created_doc = await firebase_service.get_document("documents", doc_id)
+        return DocumentResponse(**created_doc)
+        
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/documents", response_model=list[DocumentResponse])
 async def get_documents(user=Depends(get_current_user)):
-    """Get user documents"""
+    """Get user documents - MUCH FASTER WITH INDEXING"""
     try:
-        documents = await document_service.get_documents(user["uid"])
-        return documents
+        # Same API, but now uses user's document index for instant retrieval
+        documents = await firebase_service.get_user_items_by_index(
+            uid=user["uid"],
+            collection="documents",
+            index_type="document_ids",
+            limit=100  # reasonable limit for mobile
+        )
+        
+        # Sort by updated_at (most recent first)
+        documents.sort(key=lambda x: x.get("updated_at", datetime.min), reverse=True)
+        
+        return [DocumentResponse(**doc) for doc in documents]
+        
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -379,23 +484,27 @@ async def get_document(
     document_id: str,
     user=Depends(get_current_user)
 ):
-    """Get specific document"""
+    """Get specific document - SAME PERFORMANCE (ALREADY FAST)"""
     try:
         document = await document_service.get_document(document_id, user["uid"])
+        if not document:
+            raise HTTPException(status_code=404, detail="Document not found")
         return document
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=404, detail="Document not found")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.put("/documents/{document_id}", response_model=DocumentResponse)
 async def update_document(
     document_id: str,
-    document_update: DocumentUpdate,
+    document: DocumentUpdate,
     user=Depends(get_current_user)
 ):
-    """Update document"""
+    """Update document - SAME API"""
     try:
         updated_document = await document_service.update_document(
-            document_id, document_update, user["uid"]
+            document_id, document, user["uid"]
         )
         return updated_document
     except Exception as e:
@@ -406,10 +515,23 @@ async def delete_document(
     document_id: str,
     user=Depends(get_current_user)
 ):
-    """Delete document"""
+    """Delete document - WITH AUTOMATIC INDEX CLEANUP"""
     try:
-        await document_service.delete_document(document_id, user["uid"])
+        # Enhanced: Remove from document collection AND user index
+        success = await firebase_service.delete_document_with_index(
+            collection="documents",
+            doc_id=document_id,
+            user_id=user["uid"],
+            index_type="document_ids"
+        )
+        
+        if not success:
+            raise HTTPException(status_code=404, detail="Document not found")
+            
         return {"message": "Document deleted successfully"}
+        
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -558,9 +680,10 @@ async def get_user_conversations(
 async def create_new_conversation(
     user=Depends(get_current_user)
 ):
-    """Create a new conversation session"""
+    """Create a new conversation session - WITH INDEX UPDATE"""
     try:
-        conversation_id = await ai_service.create_conversation_session(user["uid"])
+        # Use indexed conversation creation
+        conversation_id = await ai_service.create_conversation_session_indexed(user["uid"])
         return {"conversation_id": conversation_id, "message": "New conversation created"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -570,9 +693,10 @@ async def get_conversation_messages(
     conversation_id: str,
     user=Depends(get_current_user)
 ):
-    """Get messages for a specific conversation"""
+    """Get messages for a specific conversation - OPTIMIZED"""
     try:
-        messages = await ai_service.get_conversation_messages(user["uid"], conversation_id)
+        # Same API, optimized performance
+        messages = await ai_service.get_conversation_messages_optimized(user["uid"], conversation_id)
         return {"messages": messages}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -582,9 +706,10 @@ async def delete_conversation(
     conversation_id: str,
     user=Depends(get_current_user)
 ):
-    """Delete a specific conversation"""
+    """Delete a specific conversation - WITH INDEX CLEANUP"""
     try:
-        success = await ai_service.delete_conversation(user["uid"], conversation_id)
+        # Same API, but now properly maintains indexes
+        success = await ai_service.delete_conversation_indexed(user["uid"], conversation_id)
         return {"success": success, "message": "Conversation deleted"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -593,9 +718,10 @@ async def delete_conversation(
 async def get_chat_stats(
     user=Depends(get_current_user)
 ):
-    """Get user's chat statistics for profile screen"""
+    """Get user's chat statistics - LIGHTNING FAST O(1) LOOKUP!"""
     try:
-        stats = await ai_service.get_user_chat_stats(user["uid"])
+        # Same API, but now uses cached stats instead of expensive queries
+        stats = await ai_service.get_user_chat_stats_indexed(user["uid"])
         return stats
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -713,6 +839,374 @@ async def debug_collections_structure():
         
     except Exception as e:
         return {"error": str(e), "message": "Structure debug failed"}
+
+@app.post("/admin/migrate-all-users")
+async def migrate_all_users_to_indexed(admin_user = Depends(get_admin_user)):
+    """Migrate all existing users to indexed structure"""
+    try:
+        print("🚀 Starting migration of all users to indexed structure...")
+        
+        # Get all users from the users collection
+        all_users = await firebase_service.query_documents("users")
+        print(f"Found {len(all_users)} users to migrate")
+        
+        migrated_count = 0
+        failed_count = 0
+        skipped_count = 0
+        migration_results = []
+        
+        for user_doc in all_users:
+            user_id = user_doc.get("uid")
+            if not user_id:
+                print(f"⚠️ Skipping user with missing uid: {user_doc.get('id', 'unknown')}")
+                skipped_count += 1
+                continue
+            
+            try:
+                print(f"🔄 Migrating user: {user_id}")
+                
+                # Check if user already has indexes
+                existing_indexes = user_doc.get("indexes")
+                if existing_indexes and len(existing_indexes.get("conversation_ids", [])) > 0:
+                    print(f"✅ User {user_id} already migrated, skipping...")
+                    skipped_count += 1
+                    migration_results.append({
+                        "user_id": user_id,
+                        "status": "skipped",
+                        "reason": "already_migrated"
+                    })
+                    continue
+                
+                # Perform the migration
+                success = await migrate_single_user(user_id)
+                
+                if success:
+                    migrated_count += 1
+                    migration_results.append({
+                        "user_id": user_id,
+                        "status": "success"
+                    })
+                    print(f"✅ Successfully migrated user {user_id}")
+                else:
+                    failed_count += 1
+                    migration_results.append({
+                        "user_id": user_id,
+                        "status": "failed",
+                        "reason": "migration_function_failed"
+                    })
+                    print(f"❌ Failed to migrate user {user_id}")
+                
+            except Exception as e:
+                print(f"❌ Error migrating user {user_id}: {e}")
+                failed_count += 1
+                migration_results.append({
+                    "user_id": user_id,
+                    "status": "failed",
+                    "reason": str(e)
+                })
+            
+            # Small delay to avoid overwhelming Firebase
+            await asyncio.sleep(0.1)
+        
+        print(f"🏁 Migration completed!")
+        print(f"   Migrated: {migrated_count}")
+        print(f"   Failed: {failed_count}")
+        print(f"   Skipped: {skipped_count}")
+        
+        return {
+            "message": "Migration completed",
+            "summary": {
+                "total_users": len(all_users),
+                "migrated_users": migrated_count,
+                "failed_migrations": failed_count,
+                "skipped_users": skipped_count
+            },
+            "results": migration_results[:10],  # First 10 for brevity
+            "full_results_available": len(migration_results) > 10
+        }
+        
+    except Exception as e:
+        print(f"❌ Migration process failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Migration failed: {str(e)}")
+
+@app.post("/admin/migrate-user/{user_id}")
+async def migrate_single_user_endpoint(
+    user_id: str,
+    admin_user = Depends(get_admin_user)
+):
+    """Migrate a single user to indexed structure"""
+    try:
+        success = await migrate_single_user(user_id)
+        
+        if success:
+            return {
+                "message": f"Successfully migrated user {user_id} to indexed structure",
+                "user_id": user_id,
+                "status": "success"
+            }
+        else:
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Migration failed for user {user_id}"
+            )
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/user/dashboard")
+async def get_user_dashboard(user=Depends(get_current_user)):
+    """Get comprehensive user dashboard data using indexed approach - LIGHTNING FAST!"""
+    try:
+        user_id = user["uid"]
+        
+        # Get user profile with cached stats (O(1) operation)
+        user_profile = await firebase_service.get_user_profile(user_id)
+        
+        if not user_profile:
+            # Initialize user if they don't exist
+            await firebase_service.initialize_user_indexes(user_id)
+            user_profile = await firebase_service.get_user_profile(user_id)
+        
+        # Extract cached stats (super fast!)
+        stats = user_profile.get("stats", {})
+        indexes = user_profile.get("indexes", {})
+        
+        # Get recent conversations using indexed approach (limited to 5 for dashboard)
+        recent_conversations = []
+        conversation_ids = indexes.get("conversation_ids", [])
+        
+        if conversation_ids:
+            # Get the 5 most recent conversations
+            recent_conv_ids = conversation_ids[:5] if len(conversation_ids) <= 5 else conversation_ids[-5:]
+            
+            for conv_id in reversed(recent_conv_ids):  # Most recent first
+                try:
+                    conv = await firebase_service.get_document("conversations", conv_id)
+                    if conv:
+                        # Add last message preview
+                        recent_messages = await firebase_service.query_documents(
+                            "chat_history",
+                            filters=[
+                                ("user_id", "==", user_id),
+                                ("conversation_id", "==", conv.get("conversation_id"))
+                            ],
+                            order_by="-timestamp",
+                            limit=1
+                        )
+                        
+                        if recent_messages:
+                            last_msg = recent_messages[0]["content"]
+                            conv["last_message"] = last_msg[:100] + "..." if len(last_msg) > 100 else last_msg
+                            conv["last_message_at"] = recent_messages[0]["timestamp"]
+                        else:
+                            conv["last_message"] = "Start chatting..."
+                            conv["last_message_at"] = conv.get("created_at")
+                        
+                        recent_conversations.append(conv)
+                except Exception as e:
+                    print(f"Error loading conversation {conv_id}: {e}")
+                    continue
+        
+        # Get recent documents using indexed approach (limited to 5 for dashboard)
+        recent_documents = []
+        document_ids = indexes.get("document_ids", [])
+        
+        if document_ids:
+            # Get the 5 most recent documents
+            recent_doc_ids = document_ids[:5] if len(document_ids) <= 5 else document_ids[-5:]
+            
+            for doc_id in reversed(recent_doc_ids):  # Most recent first
+                try:
+                    doc = await firebase_service.get_document("documents", doc_id)
+                    if doc:
+                        recent_documents.append(doc)
+                except Exception as e:
+                    print(f"Error loading document {doc_id}: {e}")
+                    continue
+        
+        # Calculate today's messages dynamically (this is the only expensive operation)
+        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        messages_today = 0
+        
+        try:
+            today_messages = await firebase_service.query_documents(
+                "chat_history",
+                filters=[
+                    ("user_id", "==", user_id),
+                    ("timestamp", ">=", today_start)
+                ]
+            )
+            messages_today = len(today_messages)
+            
+            # Update cached value for next time
+            await firebase_service.update_user_stats(user_id, {
+                "messages_today": messages_today,
+                "last_activity": datetime.utcnow()
+            })
+            
+        except Exception as e:
+            print(f"Could not calculate today's messages: {e}")
+            messages_today = stats.get("messages_today", 0)
+        
+        # Determine user level based on activity
+        total_messages = stats.get("total_messages", 0)
+        user_level = "starter"
+        if total_messages > 500:
+            user_level = "expert"
+        elif total_messages > 100:
+            user_level = "pro"
+        
+        # Build comprehensive dashboard response
+        dashboard_data = {
+            "user_info": {
+                "uid": user_id,
+                "first_name": user_profile.get("first_name"),
+                "last_name": user_profile.get("last_name"),
+                "email": user_profile.get("email"),
+                "avatar_url": user_profile.get("avatar_url"),
+                "user_level": user_level
+            },
+            "stats": {
+                "total_conversations": stats.get("total_conversations", 0),
+                "total_documents": stats.get("total_documents", 0),
+                "total_messages": total_messages,
+                "total_tasks": stats.get("total_tasks", 0),
+                "messages_today": messages_today,
+                "last_activity": stats.get("last_activity"),
+                "last_message_at": stats.get("last_message_at"),
+                
+                # Calculated metrics
+                "avg_messages_per_conversation": (
+                    total_messages / stats.get("total_conversations", 1) if stats.get("total_conversations", 0) > 0 else 0
+                ),
+                "estimated_hours_saved": round(total_messages * 0.1, 1)  # 6 minutes per 10 messages
+            },
+            "recent_activity": {
+                "conversations": recent_conversations,
+                "documents": recent_documents
+            },
+            "quick_stats": {
+                "conversations_this_week": 0,  # Could be calculated if needed
+                "documents_this_week": 0,      # Could be calculated if needed
+                "productivity_score": min(100, total_messages),  # Simple score out of 100
+            },
+            "indexes_info": {  # For debugging/admin purposes
+                "conversation_count": len(indexes.get("conversation_ids", [])),
+                "document_count": len(indexes.get("document_ids", [])),
+                "task_count": len(indexes.get("task_ids", [])),
+                "last_index_update": user_profile.get("updated_at")
+            }
+        }
+        
+        return dashboard_data
+        
+    except Exception as e:
+        print(f"Error getting user dashboard: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to load dashboard: {str(e)}")
+
+# Alternative simpler version if you want just the stats
+@app.get("/user/stats")
+async def get_user_stats_simple(user=Depends(get_current_user)):
+    """Get user statistics in a simple format"""
+    try:
+        user_id = user["uid"]
+        
+        # Get cached stats from user profile
+        user_profile = await firebase_service.get_user_profile(user_id)
+        
+        if not user_profile:
+            return {
+                "total_conversations": 0,
+                "total_documents": 0,
+                "total_messages": 0,
+                "total_tasks": 0,
+                "messages_today": 0
+            }
+        
+        stats = user_profile.get("stats", {})
+        
+        # Update today's messages
+        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        try:
+            today_messages = await firebase_service.query_documents(
+                "chat_history",
+                filters=[
+                    ("user_id", "==", user_id),
+                    ("timestamp", ">=", today_start)
+                ]
+            )
+            messages_today = len(today_messages)
+        except:
+            messages_today = stats.get("messages_today", 0)
+        
+        return {
+            "total_conversations": stats.get("total_conversations", 0),
+            "total_documents": stats.get("total_documents", 0),  
+            "total_messages": stats.get("total_messages", 0),
+            "total_tasks": stats.get("total_tasks", 0),
+            "messages_today": messages_today,
+            "last_activity": stats.get("last_activity"),
+            "last_message_at": stats.get("last_message_at")
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Quick endpoint to just get user profile with stats (for React Native)
+@app.get("/user/profile-with-stats")
+async def get_user_profile_with_stats(user=Depends(get_current_user)):
+    """Get user profile with embedded stats - optimized for mobile"""
+    try:
+        user_id = user["uid"]
+        user_profile = await firebase_service.get_user_profile(user_id)
+        
+        if not user_profile:
+            raise HTTPException(status_code=404, detail="User profile not found")
+        
+        # Calculate today's messages quickly
+        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        messages_today = 0
+        
+        try:
+            today_messages = await firebase_service.query_documents(
+                "chat_history",
+                filters=[
+                    ("user_id", "==", user_id),
+                    ("timestamp", ">=", today_start)
+                ]
+            )
+            messages_today = len(today_messages)
+        except:
+            pass
+        
+        stats = user_profile.get("stats", {})
+        total_messages = stats.get("total_messages", 0)
+        
+        return {
+            # User profile info
+            "uid": user_id,
+            "first_name": user_profile.get("first_name"),
+            "last_name": user_profile.get("last_name"),
+            "email": user_profile.get("email"),
+            "phone": user_profile.get("phone"),
+            "avatar_url": user_profile.get("avatar_url"),
+            "bio": user_profile.get("bio"),
+            "location": user_profile.get("location"),
+            
+            # Embedded stats for ProfileScreen
+            "activity_stats": {
+                "tasks_completed": stats.get("total_tasks", 0),
+                "documents_created": stats.get("total_documents", 0),
+                "hours_saved": round(total_messages * 0.1, 1),
+                "ai_chats": stats.get("total_conversations", 0),
+                "total_messages": total_messages,
+                "messages_today": messages_today,
+                "last_chat_at": stats.get("last_message_at")
+            }
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     uvicorn.run(

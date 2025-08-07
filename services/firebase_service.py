@@ -61,6 +61,353 @@ class FirebaseService:
             print(f"⚠️ Firebase initialization failed: {e}")
             raise e
     
+    async def get_user_indexes(self, uid: str) -> Dict[str, Any]:
+        """Get user's data indexes"""
+        try:
+            user_doc = await self.get_user_profile(uid)
+            if not user_doc:
+                # Initialize user with empty indexes
+                await self.initialize_user_indexes(uid)
+                return self._get_empty_indexes()
+            
+            return user_doc.get("indexes", self._get_empty_indexes())
+        except Exception as e:
+            print(f"❌ Failed to get user indexes: {e}")
+            return self._get_empty_indexes()
+    
+    async def initialize_user_indexes(self, uid: str) -> bool:
+        """Initialize user document with empty indexes"""
+        try:
+            user_data = {
+                "indexes": self._get_empty_indexes(),
+                "stats": self._get_empty_stats(),
+                "created_at": datetime.utcnow(),
+                "updated_at": datetime.utcnow()
+            }
+            
+            user_ref = self.get_user_document_ref(uid)
+            user_ref.set(user_data, merge=True)  # Merge to not overwrite existing data
+            print(f"✅ Initialized indexes for user {uid}")
+            return True
+        except Exception as e:
+            print(f"❌ Failed to initialize user indexes: {e}")
+            return False
+    
+    async def add_to_user_index(self, uid: str, index_type: str, item_id: str) -> bool:
+        """Add an item ID to user's index array"""
+        try:
+            user_ref = self.get_user_document_ref(uid)
+            
+            # Use Firestore transaction to ensure consistency
+            transaction = self.db.transaction()
+            
+            @firestore.transactional
+            def update_index(transaction, user_ref):
+                # Get current user data
+                user_doc = user_ref.get(transaction=transaction)
+                user_data = user_doc.to_dict() if user_doc.exists else {}
+                
+                # Initialize indexes if they don't exist
+                if "indexes" not in user_data:
+                    user_data["indexes"] = self._get_empty_indexes()
+                if "stats" not in user_data:
+                    user_data["stats"] = self._get_empty_stats()
+                
+                # Add to the specific index array
+                index_array = user_data["indexes"].get(index_type, [])
+                if item_id not in index_array:
+                    index_array.append(item_id)
+                    user_data["indexes"][index_type] = index_array
+                    
+                    # Update corresponding stat
+                    stat_key = self._get_stat_key_for_index(index_type)
+                    if stat_key:
+                        user_data["stats"][stat_key] = len(index_array)
+                
+                user_data["updated_at"] = datetime.utcnow()
+                
+                # Update the document
+                transaction.set(user_ref, user_data, merge=True)
+            
+            update_index(transaction, user_ref)
+            print(f"✅ Added {item_id} to {uid}'s {index_type} index")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Failed to add to user index: {e}")
+            return False
+    
+    async def remove_from_user_index(self, uid: str, index_type: str, item_id: str) -> bool:
+        """Remove an item ID from user's index array"""
+        try:
+            user_ref = self.get_user_document_ref(uid)
+            
+            transaction = self.db.transaction()
+            
+            @firestore.transactional
+            def update_index(transaction, user_ref):
+                user_doc = user_ref.get(transaction=transaction)
+                if not user_doc.exists:
+                    return
+                
+                user_data = user_doc.to_dict()
+                indexes = user_data.get("indexes", {})
+                stats = user_data.get("stats", {})
+                
+                # Remove from the specific index array
+                index_array = indexes.get(index_type, [])
+                if item_id in index_array:
+                    index_array.remove(item_id)
+                    indexes[index_type] = index_array
+                    
+                    # Update corresponding stat
+                    stat_key = self._get_stat_key_for_index(index_type)
+                    if stat_key:
+                        stats[stat_key] = len(index_array)
+                
+                user_data["indexes"] = indexes
+                user_data["stats"] = stats
+                user_data["updated_at"] = datetime.utcnow()
+                
+                transaction.set(user_ref, user_data, merge=True)
+            
+            update_index(transaction, user_ref)
+            print(f"✅ Removed {item_id} from {uid}'s {index_type} index")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Failed to remove from user index: {e}")
+            return False
+    
+    async def get_user_items_by_index(
+        self, 
+        uid: str, 
+        collection: str, 
+        index_type: str, 
+        limit: Optional[int] = None,
+        offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """Get user's items using the index for efficient retrieval"""
+        try:
+            # Get the index from user document
+            indexes = await self.get_user_indexes(uid)
+            item_ids = indexes.get(index_type, [])
+            
+            if not item_ids:
+                return []
+            
+            # Apply pagination
+            if limit:
+                paginated_ids = item_ids[offset:offset + limit]
+            else:
+                paginated_ids = item_ids[offset:]
+            
+            # Batch get documents by ID
+            items = []
+            for item_id in paginated_ids:
+                try:
+                    item = await self.get_document(collection, item_id)
+                    if item:
+                        items.append(item)
+                except Exception as e:
+                    print(f"⚠️ Could not fetch {item_id} from {collection}: {e}")
+                    # Remove invalid ID from index
+                    await self.remove_from_user_index(uid, index_type, item_id)
+            
+            return items
+            
+        except Exception as e:
+            print(f"❌ Failed to get user items by index: {e}")
+            return []
+    
+    async def update_user_stats(self, uid: str, stats_update: Dict[str, Any]) -> bool:
+        """Update user statistics"""
+        try:
+            user_ref = self.get_user_document_ref(uid)
+            
+            transaction = self.db.transaction()
+            
+            @firestore.transactional
+            def update_stats(transaction, user_ref):
+                user_doc = user_ref.get(transaction=transaction)
+                user_data = user_doc.to_dict() if user_doc.exists else {}
+                
+                if "stats" not in user_data:
+                    user_data["stats"] = self._get_empty_stats()
+                
+                # Update the stats
+                user_data["stats"].update(stats_update)
+                user_data["updated_at"] = datetime.utcnow()
+                
+                transaction.set(user_ref, user_data, merge=True)
+            
+            update_stats(transaction, user_ref)
+            print(f"✅ Updated stats for user {uid}")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Failed to update user stats: {e}")
+            return False
+
+    async def create_document_with_index(
+        self, 
+        collection: str, 
+        data: Dict[str, Any], 
+        user_id: str,
+        index_type: str
+    ) -> str:
+        """Create document and update user index in a single transaction"""
+        try:
+            doc_id = str(uuid.uuid4())
+            now = datetime.utcnow()
+            
+            # Prepare document data
+            data.update({
+                "id": doc_id,
+                "user_id": user_id,
+                "created_at": now,
+                "updated_at": now
+            })
+            
+            # Create document
+            await self.create_document(collection, data, doc_id)
+            
+            # Update user index
+            await self.add_to_user_index(user_id, index_type, doc_id)
+            
+            print(f"✅ Created {collection} document {doc_id} with index update")
+            return doc_id
+            
+        except Exception as e:
+            print(f"❌ Failed to create document with index: {e}")
+            raise e
+    
+    async def delete_document_with_index(
+        self, 
+        collection: str, 
+        doc_id: str, 
+        user_id: str,
+        index_type: str
+    ) -> bool:
+        """Delete document and update user index"""
+        try:
+            # Delete document
+            success = await self.delete_document(collection, doc_id)
+            
+            if success:
+                # Remove from user index
+                await self.remove_from_user_index(user_id, index_type, doc_id)
+                print(f"✅ Deleted {collection} document {doc_id} with index update")
+            
+            return success
+            
+        except Exception as e:
+            print(f"❌ Failed to delete document with index: {e}")
+            return False
+    
+    # ============================================================================
+    # HELPER METHODS
+    # ============================================================================
+    
+    def _get_empty_indexes(self) -> Dict[str, List[str]]:
+        """Get empty index structure"""
+        return {
+            "conversation_ids": [],
+            "document_ids": [],
+            "task_ids": [],
+            "chat_session_ids": [],
+            "note_ids": []
+        }
+    
+    def _get_empty_stats(self) -> Dict[str, Any]:
+        """Get empty stats structure"""
+        return {
+            "total_conversations": 0,
+            "total_documents": 0,
+            "total_tasks": 0,
+            "total_messages": 0,
+            "total_notes": 0,
+            "messages_today": 0,
+            "last_activity": None,
+            "last_message_at": None
+        }
+    
+    def _get_stat_key_for_index(self, index_type: str) -> Optional[str]:
+        """Map index type to corresponding stat key"""
+        mapping = {
+            "conversation_ids": "total_conversations",
+            "document_ids": "total_documents",
+            "task_ids": "total_tasks",
+            "note_ids": "total_notes"
+        }
+        return mapping.get(index_type)
+    
+    async def migrate_user_to_indexed_structure(self, uid: str) -> bool:
+        """Migrate existing user data to indexed structure"""
+        try:
+            print(f"🔄 Migrating user {uid} to indexed structure...")
+            
+            # Initialize user indexes
+            await self.initialize_user_indexes(uid)
+            
+            # Migrate conversations
+            conversations = await self.query_documents(
+                "conversations",
+                filters=[("user_id", "==", uid)]
+            )
+            
+            conversation_ids = []
+            for conv in conversations:
+                conversation_ids.append(conv["id"])
+            
+            # Migrate documents
+            documents = await self.query_documents(
+                "documents", 
+                filters=[("user_id", "==", uid)]
+            )
+            
+            document_ids = []
+            for doc in documents:
+                document_ids.append(doc["id"])
+            
+            # Count messages for stats
+            messages = await self.query_documents(
+                "chat_history",
+                filters=[("user_id", "==", uid)]
+            )
+            
+            # Update user document with indexes and stats
+            user_data = {
+                "indexes": {
+                    "conversation_ids": conversation_ids,
+                    "document_ids": document_ids,
+                    "task_ids": [],  # Add tasks if they exist
+                    "chat_session_ids": [],
+                    "note_ids": []
+                },
+                "stats": {
+                    "total_conversations": len(conversations),
+                    "total_documents": len(documents),
+                    "total_messages": len(messages),
+                    "total_tasks": 0,
+                    "total_notes": 0,
+                    "messages_today": 0,  # Calculate this based on today's messages
+                    "last_activity": datetime.utcnow(),
+                    "last_message_at": messages[-1]["timestamp"] if messages else None
+                },
+                "updated_at": datetime.utcnow()
+            }
+            
+            user_ref = self.get_user_document_ref(uid)
+            user_ref.set(user_data, merge=True)
+            
+            print(f"✅ Successfully migrated user {uid}")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Failed to migrate user {uid}: {e}")
+            return False
+
     def get_server_url(self) -> str:
         """Get server base URL for constructing file URLs"""
         return self.server_base_url

@@ -711,3 +711,206 @@ Example format:
                 "avg_messages_per_conversation": 0.0,
                 "last_chat_at": None
             }
+    
+    async def create_conversation_session_indexed(self, user_id: str) -> str:
+        """Create conversation session using indexed approach"""
+        try:
+            conversation_id = str(uuid.uuid4())
+            now = datetime.utcnow()
+            
+            session_data = {
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "created_at": now,
+                "updated_at": now,
+                "message_count": 0,
+                "title": "New Chat",
+                "status": "active"
+            }
+            
+            # Create conversation document and update user index
+            doc_id = await self.firebase_service.create_document_with_index(
+                collection="conversations",
+                data=session_data,
+                user_id=user_id,
+                index_type="conversation_ids"
+            )
+            
+            return conversation_id
+        except Exception as e:
+            print(f"Failed to create conversation session: {e}")
+            raise e
+    
+    async def get_user_conversations_indexed(
+        self, 
+        user_id: str, 
+        limit: int = 50, 
+        offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """Get user conversations using index - much faster!"""
+        try:
+            # Get conversations using the user's index
+            conversations = await self.firebase_service.get_user_items_by_index(
+                uid=user_id,
+                collection="conversations",
+                index_type="conversation_ids",
+                limit=limit,
+                offset=offset
+            )
+            
+            # Sort by updated_at (most recent first)
+            conversations.sort(key=lambda x: x.get("updated_at", datetime.min), reverse=True)
+            
+            # Add recent message preview for each conversation
+            for conv in conversations:
+                try:
+                    # Get recent messages for this specific conversation
+                    recent_messages = await self.firebase_service.query_documents(
+                        "chat_history",
+                        filters=[
+                            ("user_id", "==", user_id),
+                            ("conversation_id", "==", conv.get("conversation_id"))
+                        ],
+                        order_by="-timestamp",
+                        limit=1
+                    )
+                    
+                    if recent_messages:
+                        last_msg = recent_messages[0]["content"]
+                        conv["last_message"] = last_msg[:100] + "..." if len(last_msg) > 100 else last_msg
+                        conv["last_message_at"] = recent_messages[0]["timestamp"]
+                    else:
+                        conv["last_message"] = "Start chatting..."
+                        conv["last_message_at"] = conv.get("created_at", datetime.utcnow())
+                        
+                except Exception as e:
+                    print(f"Error getting recent message: {e}")
+                    conv["last_message"] = "Start chatting..."
+                    conv["last_message_at"] = conv.get("created_at", datetime.utcnow())
+            
+            return conversations
+            
+        except Exception as e:
+            print(f"Failed to get user conversations: {e}")
+            return []
+    
+    async def get_user_chat_stats_indexed(self, user_id: str) -> Dict[str, Any]:
+        """Get chat stats using user's cached statistics - O(1) operation!"""
+        try:
+            # Get user document with pre-calculated stats
+            user_profile = await self.firebase_service.get_user_profile(user_id)
+            
+            if not user_profile or "stats" not in user_profile:
+                # Initialize if missing
+                await self.firebase_service.initialize_user_indexes(user_id)
+                return {
+                    "total_conversations": 0,
+                    "total_messages": 0,
+                    "messages_today": 0,
+                    "avg_messages_per_conversation": 0.0,
+                    "last_chat_at": None
+                }
+            
+            stats = user_profile["stats"]
+            
+            # Calculate messages today (this is the only dynamic calculation needed)
+            today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            messages_today = 0
+            
+            # You could also cache this in a separate field updated by a background job
+            try:
+                today_messages = await self.firebase_service.query_documents(
+                    "chat_history",
+                    filters=[
+                        ("user_id", "==", user_id),
+                        ("timestamp", ">=", today_start)
+                    ]
+                )
+                messages_today = len(today_messages)
+                
+                # Update the cached value
+                await self.firebase_service.update_user_stats(user_id, {
+                    "messages_today": messages_today,
+                    "last_activity": datetime.utcnow()
+                })
+                
+            except Exception as e:
+                print(f"Could not calculate today's messages: {e}")
+                messages_today = stats.get("messages_today", 0)
+            
+            total_conversations = stats.get("total_conversations", 0)
+            total_messages = stats.get("total_messages", 0)
+            
+            return {
+                "total_conversations": total_conversations,
+                "total_messages": total_messages, 
+                "messages_today": messages_today,
+                "avg_messages_per_conversation": (
+                    total_messages / total_conversations if total_conversations > 0 else 0.0
+                ),
+                "last_chat_at": stats.get("last_message_at")
+            }
+            
+        except Exception as e:
+            print(f"Failed to get chat stats: {e}")
+            return {
+                "total_conversations": 0,
+                "total_messages": 0,
+                "messages_today": 0,
+                "avg_messages_per_conversation": 0.0,
+                "last_chat_at": None
+            }
+    
+    async def delete_conversation_indexed(self, user_id: str, conversation_id: str) -> bool:
+        """Delete conversation and update indexes"""
+        try:
+            # Find the conversation document
+            conversations = await self.firebase_service.query_documents(
+                "conversations",
+                filters=[
+                    ("user_id", "==", user_id),
+                    ("conversation_id", "==", conversation_id)
+                ]
+            )
+            
+            if not conversations:
+                return False
+            
+            conv_doc_id = conversations[0]["id"]
+            
+            # Delete all messages in the conversation
+            messages = await self.firebase_service.query_documents(
+                "chat_history",
+                filters=[
+                    ("user_id", "==", user_id),
+                    ("conversation_id", "==", conversation_id)
+                ]
+            )
+            
+            # Delete messages (could batch this)
+            for msg in messages:
+                await self.firebase_service.delete_document("chat_history", msg["id"])
+            
+            # Delete conversation document and update index
+            success = await self.firebase_service.delete_document_with_index(
+                collection="conversations",
+                doc_id=conv_doc_id,
+                user_id=user_id,
+                index_type="conversation_ids"
+            )
+            
+            # Update message count stat
+            if success:
+                current_stats = await self.firebase_service.get_user_profile(user_id)
+                current_total = current_stats.get("stats", {}).get("total_messages", 0)
+                new_total = max(0, current_total - len(messages))
+                
+                await self.firebase_service.update_user_stats(user_id, {
+                    "total_messages": new_total
+                })
+            
+            return success
+            
+        except Exception as e:
+            print(f"Failed to delete conversation: {e}")
+            return False
