@@ -407,6 +407,133 @@ class FirebaseService:
         except Exception as e:
             print(f"❌ Failed to migrate user {uid}: {e}")
             return False
+    
+    async def save_chat_messages_with_indexes(
+        user_id: str,
+        conversation_id: str,
+        user_message: str,
+        ai_response: str,
+        tokens_used: int = 0
+    ):
+        """Save chat messages and update user statistics automatically"""
+        try:
+            now = datetime.utcnow()
+            
+            # Save user message
+            user_message_data = {
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "role": "user",
+                "content": user_message,
+                "timestamp": now,
+                "message_type": "text"
+            }
+            
+            await firebase_service.create_document("chat_history", user_message_data)
+            
+            # Save AI response
+            ai_message_data = {
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "role": "assistant",
+                "content": ai_response,
+                "timestamp": now,
+                "message_type": "text",
+                "tokens_used": tokens_used,
+                "model_used": "claude-3"
+            }
+            
+            await firebase_service.create_document("chat_history", ai_message_data)
+            
+            # Update user stats (increment by 2 messages)
+            await update_user_message_stats_efficient(user_id, 2)
+            
+            # Update conversation metadata
+            await update_conversation_metadata_efficient(user_id, conversation_id, user_message, ai_response)
+            
+        except Exception as e:
+            print(f"Failed to save messages with indexes: {e}")
+    
+    async def update_user_message_stats_efficient(user_id: str, message_count: int):
+        """Efficiently update user message statistics"""
+        try:
+            # Calculate messages today efficiently
+            today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            
+            # Get current stats
+            user_profile = await firebase_service.get_user_profile(user_id)
+            current_stats = user_profile.get("stats", {}) if user_profile else {}
+            
+            # Update total messages
+            total_messages = current_stats.get("total_messages", 0) + message_count
+            
+            # Quick query for today's count
+            today_messages = await firebase_service.query_documents(
+                "chat_history",
+                filters=[
+                    ("user_id", "==", user_id),
+                    ("timestamp", ">=", today_start)
+                ]
+            )
+            
+            # Update stats in single operation
+            stats_update = {
+                "total_messages": total_messages,
+                "messages_today": len(today_messages),
+                "last_message_at": datetime.utcnow(),
+                "last_activity": datetime.utcnow()
+            }
+            
+            await firebase_service.update_user_stats(user_id, stats_update)
+            
+        except Exception as e:
+            print(f"Failed to update message stats: {e}")
+
+async def update_conversation_metadata_efficient(
+    user_id: str,
+    conversation_id: str,
+    user_message: str,
+    ai_response: str
+):
+    """Efficiently update conversation title and metadata"""
+    try:
+        # Find conversation
+        conversations = await firebase_service.query_documents(
+            "conversations",
+            filters=[
+                ("user_id", "==", user_id),
+                ("conversation_id", "==", conversation_id)
+            ]
+        )
+        
+        if not conversations:
+            return
+        
+        conv_doc = conversations[0]
+        
+        # Generate title if needed
+        title = conv_doc.get("title", "New Chat")
+        if title == "New Chat" and len(user_message) > 10:
+            sentences = user_message.split('. ')
+            if sentences and len(sentences[0]) > 10:
+                title = sentences[0][:50] + "..." if len(sentences[0]) > 50 else sentences[0]
+            else:
+                title = user_message[:30] + "..." if len(user_message) > 30 else user_message
+        
+        # Update metadata
+        update_data = {
+            "updated_at": datetime.utcnow(),
+            "title": title,
+            "message_count": conv_doc.get("message_count", 0) + 2,
+            "last_message": ai_response[:100] + "..." if len(ai_response) > 100 else ai_response,
+            "last_message_at": datetime.utcnow()
+        }
+        
+        await firebase_service.update_document("conversations", conv_doc["id"], update_data)
+        
+    except Exception as e:
+        print(f"Failed to update conversation metadata: {e}")
+    
 
     def get_server_url(self) -> str:
         """Get server base URL for constructing file URLs"""

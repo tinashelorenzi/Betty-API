@@ -1,6 +1,6 @@
 # services/ai_service.py - COMPLETE FIXED VERSION WITH ALL YOUR FUNCTIONALITY
 import google.generativeai as genai
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 import os
 import time
@@ -914,3 +914,263 @@ Example format:
         except Exception as e:
             print(f"Failed to delete conversation: {e}")
             return False
+
+class SmartDocumentDecisionMixin:
+    """Mixin for intelligent document creation decisions"""
+    
+    # Document creation keywords that are strong indicators
+    STRONG_DOCUMENT_INDICATORS = [
+        "create a document", "make a document", "generate a document",
+        "write a contract", "create a contract", "draft a contract",
+        "create an invoice", "generate an invoice", "make an invoice",
+        "write a business plan", "create a business plan",
+        "draft an nda", "create an nda", "make an nda",
+        "write a proposal", "create a proposal", "draft a proposal",
+        "create a template", "make a template", "generate a template",
+        "write a policy", "create a policy", "draft a policy"
+    ]
+    
+    # Weak indicators that need context analysis
+    WEAK_DOCUMENT_INDICATORS = [
+        "create", "make", "write", "draft", "generate", "prepare"
+    ]
+    
+    # Words that indicate it's NOT a document request
+    NON_DOCUMENT_CONTEXT = [
+        "task", "reminder", "appointment", "meeting", "calendar", "event",
+        "explain", "how to", "what is", "tell me", "help me understand",
+        "advice", "recommend", "suggest", "opinion", "think", "question"
+    ]
+    
+    # Document types and their keywords
+    DOCUMENT_TYPES = {
+        "contract": ["contract", "agreement", "terms", "conditions"],
+        "invoice": ["invoice", "bill", "payment", "charge", "cost"],
+        "business_plan": ["business plan", "strategy", "market analysis"],
+        "nda": ["nda", "non-disclosure", "confidentiality"],
+        "proposal": ["proposal", "pitch", "offer", "quotation"],
+        "template": ["template", "format", "layout"],
+        "policy": ["policy", "procedure", "guideline", "rule"],
+        "moi": ["moi", "memorandum of incorporation", "articles"]
+    }
+
+    def should_create_document(self, user_message: str) -> Tuple[bool, str]:
+        """
+        Intelligently decide if the user wants a document created
+        Returns: (should_create, document_type)
+        """
+        message_lower = user_message.lower()
+        
+        # 1. Check for strong document indicators (high confidence)
+        for indicator in self.STRONG_DOCUMENT_INDICATORS:
+            if indicator in message_lower:
+                doc_type = self._extract_document_type(message_lower)
+                return True, doc_type
+        
+        # 2. Check for non-document context (immediate no)
+        if any(context in message_lower for context in self.NON_DOCUMENT_CONTEXT):
+            return False, ""
+        
+        # 3. Analyze weak indicators with context
+        has_weak_indicator = any(word in message_lower for word in self.WEAK_DOCUMENT_INDICATORS)
+        
+        if has_weak_indicator:
+            # Check if it's asking for document creation specifically
+            doc_keywords = ["document", "contract", "invoice", "template", "policy", 
+                          "business plan", "proposal", "nda", "agreement", "moi"]
+            
+            has_doc_keyword = any(keyword in message_lower for keyword in doc_keywords)
+            
+            if has_doc_keyword:
+                doc_type = self._extract_document_type(message_lower)
+                return True, doc_type
+        
+        # 4. Check for implicit document requests
+        if self._is_implicit_document_request(message_lower):
+            doc_type = self._extract_document_type(message_lower)
+            return True, doc_type
+        
+        return False, ""
+    
+    def _extract_document_type(self, message_lower: str) -> str:
+        """Extract the specific document type from the message"""
+        for doc_type, keywords in self.DOCUMENT_TYPES.items():
+            if any(keyword in message_lower for keyword in keywords):
+                return doc_type
+        return "template"  # Default type
+    
+    def _is_implicit_document_request(self, message_lower: str) -> bool:
+        """Check for implicit document requests"""
+        implicit_patterns = [
+            r"i need a .* (contract|invoice|template|policy)",
+            r"can you .* (contract|invoice|template|policy)",
+            r"help me with .* (contract|invoice|template|policy)",
+            r"(contract|invoice|template|policy) for",
+        ]
+        
+        return any(re.search(pattern, message_lower) for pattern in implicit_patterns)
+
+# Enhanced AI Service with smart decision making
+class EnhancedAIService(AIService, SmartDocumentDecisionMixin):
+    """Enhanced AI Service with intelligent document creation"""
+    
+    async def process_message(self, message: ChatMessage, user_id: str, conversation_id: Optional[str] = None) -> ChatResponse:
+        """Process user message with smart document creation decisions"""
+        try:
+            start_time = time.time()
+            
+            # Create conversation if not provided
+            if not conversation_id:
+                conversation_id = await self.create_conversation_session(user_id)
+            
+            # SMART DECISION: Should we create a document?
+            should_create_doc, doc_type = self.should_create_document(message.content)
+            
+            # Get user context with conversation history
+            context = await self._get_user_context(user_id, conversation_id)
+            
+            # Build prompt with context and document creation instructions
+            system_prompt = self._build_enhanced_system_prompt(context, should_create_doc, doc_type)
+            full_prompt = f"{system_prompt}\n\nUser message: {message.content}"
+            
+            # Generate AI response
+            if self.model:
+                response = await self._generate_ai_response(full_prompt)
+            else:
+                response = await self._generate_enhanced_mock_response(
+                    message.content, should_create_doc, doc_type
+                )
+            
+            processing_time = time.time() - start_time
+            
+            # Parse response for special actions
+            parsed_response = self._parse_ai_response(response)
+            
+            # Override document creation based on smart decision
+            if not should_create_doc:
+                parsed_response["document_created"] = False
+                parsed_response["document_title"] = None
+                parsed_response["document_content"] = None
+                parsed_response["message_type"] = "text"
+            
+            # Save message history
+            if self.firebase_service:
+                await self._save_message_history(
+                    user_id, message.content, response, processing_time, conversation_id
+                )
+            
+            return ChatResponse(
+                content=parsed_response["content"],
+                message_type=MessageType(parsed_response.get("message_type", "text")),
+                document_created=parsed_response.get("document_created", False),
+                document_title=parsed_response.get("document_title"),
+                document_content=parsed_response.get("document_content"),
+                document_type=parsed_response.get("document_type"),
+                task_created=parsed_response.get("task_created", False),
+                task_data=parsed_response.get("task_data"),
+                calendar_event_created=parsed_response.get("calendar_event_created", False),
+                event_data=parsed_response.get("event_data"),
+                processing_time=processing_time,
+                tokens_used=parsed_response.get("tokens_used"),
+                confidence_score=parsed_response.get("confidence_score", 0.9)
+            )
+            
+        except Exception as e:
+            print(f"Error in enhanced process_message: {e}")
+            return ChatResponse(
+                content=f"I apologize, but I'm having trouble processing your request right now. Error: {str(e)}",
+                message_type=MessageType.TEXT,
+                processing_time=time.time() - start_time if 'start_time' in locals() else 0
+            )
+    
+    def _build_enhanced_system_prompt(self, context: AIContext, should_create_doc: bool, doc_type: str) -> str:
+        """Build enhanced system prompt with document creation logic"""
+        current_time = datetime.now().strftime("%A, %B %d, %Y at %I:%M %p SAST")
+        
+        base_prompt = f"""You are "Betty", an expert AI business assistant for South African businesses.
+
+**CURRENT CONTEXT:**
+- Time: {current_time}  
+- User Location: {context.user_location}
+- User Timezone: {context.user_timezone}
+
+**SMART DOCUMENT CREATION:**"""
+        
+        if should_create_doc:
+            base_prompt += f"""
+DOCUMENT CREATION REQUIRED: YES - {doc_type.upper()}
+When responding, you MUST use this format:
+1. User-facing confirmation message
+2. '|||' separator  
+3. Complete {doc_type} document content
+
+Example: "I'll create a {doc_type} for you.|||**{doc_type.title()}**\n\n[Full document content]"
+"""
+        else:
+            base_prompt += """
+DOCUMENT CREATION REQUIRED: NO
+Provide a helpful response without creating any documents. Do NOT use the '|||' separator.
+Focus on answering the user's question or providing advice.
+"""
+        
+        base_prompt += f"""
+
+**YOUR CAPABILITIES:**
+- Business advice and strategy
+- South African business law guidance
+- Task and project management  
+- Financial planning and analysis
+- Only create documents when explicitly requested
+
+**COMMUNICATION STYLE:**
+- Professional but friendly
+- Practical and actionable advice
+- Consider South African business context
+
+**RECENT CONTEXT:**
+- Recent documents: {len(context.recent_documents)}
+- Recent tasks: {len(context.recent_tasks)}
+- Conversation history: {len(context.conversation_history)} messages"""
+
+        return base_prompt
+    
+    async def _generate_enhanced_mock_response(self, user_message: str, should_create_doc: bool, doc_type: str) -> str:
+        """Generate enhanced mock response with smart document creation"""
+        user_message = user_message.lower()
+        
+        if should_create_doc:
+            return self._create_mock_document(doc_type, user_message)
+        
+        # Non-document responses
+        if "help" in user_message or "what can you do" in user_message:
+            return """Hello! I'm Betty, your AI business assistant. I can help you with:
+
+📝 **Document Creation**: Create contracts, invoices, business plans, NDAs (when you specifically request them)
+📋 **Task Management**: Help organize your tasks and projects
+📅 **Business Planning**: Strategic advice and planning
+📊 **Analysis**: Business insights and recommendations
+🔍 **Information**: Answer questions and provide guidance
+💡 **Advice**: South African business context and best practices
+
+What would you like assistance with today?"""
+        
+        elif any(word in user_message for word in ["advice", "recommend", "suggest", "help"]):
+            return "I'd be happy to help! Could you provide more details about what specific advice or assistance you're looking for? I can help with business strategy, planning, South African regulations, or general business guidance."
+        
+        elif any(word in user_message for word in ["task", "remind", "todo"]):
+            return "I can help you organize tasks and reminders. What specific task would you like help with? I can assist with planning, prioritization, or breaking down complex projects."
+        
+        else:
+            return f"Thank you for your message. As your AI business assistant, I'm here to help with business advice, planning, and document creation when needed. How can I assist you today?"
+    
+    def _create_mock_document(self, doc_type: str, user_message: str) -> str:
+        """Create mock document based on type"""
+        templates = {
+            "contract": f"I'll create a service contract template for you.|||**Service Contract Template**\n\n**PARTIES:**\nService Provider: [Your Company Name]\nClient: [Client Name]\n\n**SERVICES:**\n[Description of services to be provided]\n\n**TERMS:**\n- Duration: [Contract duration]\n- Payment: [Payment terms]\n- Cancellation: [Cancellation policy]\n\n**SIGNATURES:**\n\nService Provider: ___________________ Date: ___________\nClient: ___________________ Date: ___________",
+            
+            "invoice": f"I'll create an invoice template for you.|||**Invoice Template**\n\n**INVOICE #:** [Invoice Number]\n**DATE:** {datetime.now().strftime('%Y-%m-%d')}\n\n**FROM:**\n[Your Company Name]\n[Address]\n[Contact Details]\n\n**TO:**\n[Client Name]\n[Client Address]\n\n**SERVICES:**\n| Description | Quantity | Rate | Amount |\n|-------------|----------|------|--------|\n| [Service 1] | 1 | R[Rate] | R[Amount] |\n\n**TOTAL:** R[Total Amount]\n\n**PAYMENT TERMS:** [Payment terms]",
+            
+            "business_plan": f"I'll create a business plan outline for you.|||**Business Plan Template**\n\n**1. EXECUTIVE SUMMARY**\n[Brief overview of your business]\n\n**2. COMPANY DESCRIPTION**\n[Detailed business description]\n\n**3. MARKET ANALYSIS**\n[Target market and competition analysis]\n\n**4. ORGANIZATION & MANAGEMENT**\n[Company structure and team]\n\n**5. SERVICE/PRODUCT LINE**\n[What you're offering]\n\n**6. MARKETING & SALES**\n[Marketing strategy]\n\n**7. FINANCIAL PROJECTIONS**\n[Revenue and expense forecasts]"
+        }
+        
+        return templates.get(doc_type, templates["contract"])

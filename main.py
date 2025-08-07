@@ -8,6 +8,7 @@ from typing import Optional
 import os
 import jwt
 from datetime import datetime
+from fastapi import Query
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -358,24 +359,30 @@ async def get_google_connection_status(user=Depends(get_current_user)):
 # CHAT/AI ROUTES
 # ============================================================================
 
+# main.py - Fixed chat message endpoint
+
 @app.post("/chat/message", response_model=ChatResponse)
 async def send_chat_message(
     message: ChatMessage,
+    conversation_id: Optional[str] = Query(None, description="Optional conversation ID"),
     user=Depends(get_current_user)
 ):
-    """Send message to Betty AI and get response - ENHANCED WITH INDEXING"""
+    """Send message to Betty AI and get response - FIXED VERSION"""
     try:
         user_id = user["uid"]
         
-        # Get or create conversation - using indexed approach
-        if not message.conversation_id:
+        # Get or create conversation - handle both query param and message body
+        if not conversation_id and not message.conversation_id:
             conversation_id = await ai_service.create_conversation_session_indexed(user_id)
-            message.conversation_id = conversation_id
+        elif conversation_id:
+            # Use conversation_id from query parameter
+            pass
         else:
+            # Use conversation_id from message body
             conversation_id = message.conversation_id
         
-        # Process message with AI (existing logic)
-        response = await ai_service.process_message(message, user_id)
+        # Process message with AI - pass conversation_id explicitly
+        response = await ai_service.process_message(message, user_id, conversation_id)
         
         # Enhanced: Save messages and update indexes automatically
         await save_chat_messages_with_indexes(
@@ -402,10 +409,17 @@ async def send_chat_message(
             )
             response.document_id = doc_id
         
+        # Add conversation_id to response for frontend
+        response.conversation_id = conversation_id
+        
         return response
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Chat message error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
 
 @app.get("/chat/history")
 async def get_chat_history(
