@@ -407,39 +407,52 @@ async def get_google_connection_status(user=Depends(get_current_user)):
 
 # main.py - Fixed chat message endpoint
 
-@app.post("/chat/message", response_model=EnhancedChatResponse)
+@app.post("/chat/message")
 async def send_chat_message(
-    message: EnhancedChatMessage,  # ✅ FIXED: Use EnhancedChatMessage instead of ChatMessage
+    message: ChatMessage,
     conversation_id: Optional[str] = Query(None, description="Optional conversation ID"),
     user=Depends(get_current_user)
 ):
-    """Send message to Betty AI and get response - FIXED VERSION"""
+    """Send message to Betty AI and get response - NETWORK ERROR FIX"""
     try:
         user_id = user["uid"]
         
+        print(f"📥 Received message: '{message.content[:50]}...'")
+        print(f"📥 Conversation ID from query: {conversation_id}")
+        print(f"📥 Conversation ID from message: {getattr(message, 'conversation_id', None)}")
+        
         # Get or create conversation - handle both query param and message body
-        if not conversation_id and not getattr(message, 'conversation_id', None):
-            conversation_id = await ai_service.create_conversation_session_indexed(user_id)
-        elif conversation_id:
-            # Use conversation_id from query parameter
-            pass
-        else:
+        final_conversation_id = None
+        
+        if conversation_id:
+            # Use conversation_id from query parameter (preferred)
+            final_conversation_id = conversation_id
+            print(f"✅ Using conversation ID from query: {final_conversation_id}")
+        elif hasattr(message, 'conversation_id') and message.conversation_id:
             # Use conversation_id from message body
-            conversation_id = message.conversation_id
+            final_conversation_id = message.conversation_id
+            print(f"✅ Using conversation ID from message body: {final_conversation_id}")
+        else:
+            # Create new conversation
+            final_conversation_id = await ai_service.create_conversation_session_indexed(user_id)
+            print(f"✅ Created new conversation: {final_conversation_id}")
         
         # Process message with AI - pass conversation_id explicitly
-        response = await ai_service.process_message(message, user_id, conversation_id)
+        print(f"🔄 Processing message with AI...")
+        response = await ai_service.process_message(message, user_id, final_conversation_id)
         
         # Enhanced: Save messages and update indexes automatically
+        print(f"💾 Saving chat messages...")
         await firebase_service.save_chat_messages_with_indexes(
             user_id=user_id,
-            conversation_id=conversation_id,
+            conversation_id=final_conversation_id,
             user_message=message.content,
             ai_response=response.content,
         )
         
         # If AI created a document, save it with indexing
         if response.document_created:
+            print(f"📄 Creating document: {response.document_title}")
             doc_data = DocumentCreate(
                 title=response.document_title,
                 content=response.document_content,
@@ -455,12 +468,13 @@ async def send_chat_message(
             response.document_id = doc_id
         
         # Add conversation_id to response for frontend
-        response.conversation_id = conversation_id
+        response.conversation_id = final_conversation_id
         
+        print(f"✅ Message processed successfully")
         return response
         
     except Exception as e:
-        print(f"Chat message error: {e}")
+        print(f"❌ Chat message error: {e}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
@@ -726,10 +740,10 @@ async def export_note_to_google_keep(
 async def get_user_conversations(
     user=Depends(get_current_user)
 ):
-    """Get user's conversation list with metadata"""
+    """Get user's conversation list - MUCH FASTER WITH INDEXING"""
     try:
-        # Get conversations grouped by session/date
-        conversations = await ai_service.get_user_conversations(user["uid"])
+        # Fixed: Use the corrected method signature
+        conversations = await ai_service.get_user_conversations_indexed(user["uid"])
         return {"conversations": conversations}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

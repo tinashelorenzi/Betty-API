@@ -527,7 +527,14 @@ class FirebaseService:
             print(f"❌ Failed to get user indexes: {e}")
             return self._get_empty_indexes()
     
-    async def get_user_items_by_index(self, uid: str, index_type: str, collection: str) -> List[Dict[str, Any]]:
+    async def get_user_items_by_index(
+    self, 
+    uid: str, 
+    index_type: str, 
+    collection: str, 
+    limit: Optional[int] = None,
+    offset: Optional[int] = None
+) -> List[Dict[str, Any]]:
         """Get user's items using their index (super fast!)"""
         try:
             indexes = await self.get_user_indexes(uid)
@@ -536,9 +543,16 @@ class FirebaseService:
             if not item_ids:
                 return []
             
+            # Apply offset and limit to the item_ids list
+            start_idx = offset if offset else 0
+            end_idx = start_idx + limit if limit else None
+            
+            # Slice the item_ids based on pagination
+            paginated_ids = item_ids[start_idx:end_idx]
+            
             # Get documents by IDs
             items = []
-            for item_id in item_ids:
+            for item_id in paginated_ids:
                 doc = await self.get_document(collection, item_id)
                 if doc:
                     items.append(doc)

@@ -307,14 +307,14 @@ Example format:
             )
     
     async def _save_message_history(
-        self, 
-        user_id: str, 
-        user_message: str, 
-        ai_response: str, 
-        processing_time: float,
-        conversation_id: Optional[str] = None
-    ):
-        """Save conversation to message history with conversation context - FIXED DATETIME"""
+    self, 
+    user_id: str, 
+    user_message: str, 
+    ai_response: str, 
+    processing_time: float,
+    conversation_id: Optional[str] = None
+):
+        """Save conversation to message history with proper timestamps - FIXED VERSION"""
         try:
             if not self.firebase_service:
                 return
@@ -323,31 +323,33 @@ Example format:
             if not conversation_id:
                 conversation_id = await self.create_conversation_session(user_id)
             
-            # Use timezone-aware UTC timestamp
-            timestamp = self._get_utc_now()
+            # Use timezone-aware UTC timestamp with slight offset for ordering
+            base_timestamp = self._get_utc_now()
             
-            # Save user message
+            # Save user message first (slightly earlier timestamp)
             user_msg_data = {
                 "user_id": user_id,
                 "conversation_id": conversation_id,
                 "role": MessageRole.USER.value,
                 "content": user_message,
                 "message_type": MessageType.TEXT.value,
-                "timestamp": timestamp,
+                "timestamp": base_timestamp,
                 "processing_time": None,
                 "context": {}
             }
             
             await self.firebase_service.create_document("chat_history", user_msg_data)
             
-            # Save AI response
+            # Save AI response (1 second later to ensure proper ordering)
+            ai_timestamp = base_timestamp.replace(microsecond=(base_timestamp.microsecond + 1) % 1000000)
+            
             ai_msg_data = {
                 "user_id": user_id,
                 "conversation_id": conversation_id,
                 "role": MessageRole.ASSISTANT.value,
                 "content": ai_response,
                 "message_type": MessageType.TEXT.value,
-                "timestamp": timestamp,
+                "timestamp": ai_timestamp,
                 "processing_time": processing_time,
                 "context": {}
             }
@@ -713,6 +715,64 @@ Example format:
                 "avg_messages_per_conversation": 0.0,
                 "last_chat_at": None
             }
+    
+    async def get_conversation_messages_optimized(self, user_id: str, conversation_id: str) -> List[MessageHistory]:
+        """Get messages for a specific conversation - OPTIMIZED VERSION"""
+        try:
+            if not self.firebase_service:
+                return []
+            
+            print(f"📥 Getting optimized messages for conversation: {conversation_id}")
+            
+            # Get messages from top-level collection with optimized query
+            messages = await self.firebase_service.query_documents(
+                "chat_history",
+                filters=[
+                    ("user_id", "==", user_id),
+                    ("conversation_id", "==", conversation_id)
+                ],
+                order_by="timestamp",  # Ascending order for proper conversation flow
+                limit=1000  # Reasonable limit for conversation
+            )
+            
+            print(f"✅ Found {len(messages)} messages for conversation {conversation_id}")
+            
+            # Sort by timestamp and then by creation order to ensure proper ordering
+            # This handles cases where messages have the same timestamp
+            messages.sort(key=lambda x: (x.get("timestamp", datetime.min), x.get("id", "")))
+            
+            # Convert to MessageHistory objects
+            return [MessageHistory(**msg) for msg in messages]
+            
+        except Exception as e:
+            print(f"❌ Failed to get conversation messages (optimized): {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+
+
+    async def get_chat_history_optimized(self, user_id: str, limit: int = 50) -> List[MessageHistory]:
+        """Get user's chat history - OPTIMIZED VERSION"""
+        try:
+            if not self.firebase_service:
+                return []
+            
+            print(f"📥 Getting optimized chat history for user: {user_id}")
+            
+            messages = await self.firebase_service.query_documents(
+                "chat_history",
+                filters=[("user_id", "==", user_id)],
+                order_by="-timestamp",
+                limit=limit
+            )
+            
+            print(f"✅ Found {len(messages)} messages in chat history")
+            
+            return [MessageHistory(**msg) for msg in messages]
+            
+        except Exception as e:
+            print(f"❌ Failed to get chat history (optimized): {e}")
+            return []
     
     async def create_conversation_session_indexed(self, user_id: str) -> str:
         """Create conversation session using indexed approach"""
