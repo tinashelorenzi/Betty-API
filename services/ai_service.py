@@ -1177,4 +1177,4 @@ What would you like assistance with today?"""
             "business_plan": f"I'll create a business plan outline for you.|||**Business Plan Template**\n\n**1. EXECUTIVE SUMMARY**\n[Brief overview of your business]\n\n**2. COMPANY DESCRIPTION**\n[Detailed business description]\n\n**3. MARKET ANALYSIS**\n[Target market and competition analysis]\n\n**4. ORGANIZATION & MANAGEMENT**\n[Company structure and team]\n\n**5. SERVICE/PRODUCT LINE**\n[What you're offering]\n\n**6. MARKETING & SALES**\n[Marketing strategy]\n\n**7. FINANCIAL PROJECTIONS**\n[Revenue and expense forecasts]"
         }
         
-        return templates.get(doc_type, templates["contract"])
+        return f"I'll create a {doc_type} for you.|||# {doc_type.title()}\n\n[Markdown content here]"
