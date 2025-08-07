@@ -1,9 +1,10 @@
-# services/firebase_service.py - COMPLETE REWRITE WITH LOCAL FILE REFERENCES
+# services/firebase_service.py - COMPLETE FIXED VERSION
 import firebase_admin
 from firebase_admin import credentials, auth, firestore
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta
 import os
+import uuid
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -28,8 +29,29 @@ class FirebaseService:
                     cred = credentials.Certificate(service_account_path)
                     firebase_admin.initialize_app(cred)
                 else:
-                    # Initialize with default credentials (for development)
-                    firebase_admin.initialize_app()
+                    # Try to use environment variables for service account
+                    service_account_info = {
+                        "type": "service_account",
+                        "project_id": os.getenv("FIREBASE_PROJECT_ID"),
+                        "private_key_id": os.getenv("FIREBASE_PRIVATE_KEY_ID"),
+                        "private_key": os.getenv("FIREBASE_PRIVATE_KEY", "").replace('\\n', '\n'),
+                        "client_email": os.getenv("FIREBASE_CLIENT_EMAIL"),
+                        "client_id": os.getenv("FIREBASE_CLIENT_ID"),
+                        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                        "token_uri": "https://oauth2.googleapis.com/token",
+                        "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+                        "client_x509_cert_url": f"https://www.googleapis.com/robot/v1/metadata/x509/{os.getenv('FIREBASE_CLIENT_EMAIL')}"
+                    }
+                    
+                    # Filter out None values
+                    service_account_info = {k: v for k, v in service_account_info.items() if v is not None}
+                    
+                    if service_account_info.get("project_id"):
+                        cred = credentials.Certificate(service_account_info)
+                        firebase_admin.initialize_app(cred)
+                    else:
+                        # Initialize with default credentials (for development)
+                        firebase_admin.initialize_app()
                 
                 self.db = firestore.client()
                 self._initialized = True
@@ -63,45 +85,19 @@ class FirebaseService:
         """Get reference to user document"""
         return self.db.document(f"users/{uid}")
     
-    async def create_user_profile(self, uid: str, profile_data: Dict[str, Any]) -> bool:
-        """Create user profile in Firestore"""
+    def get_user_collection_ref(self, uid: str, collection_name: str):
+        """Get reference to user's subcollection"""
+        return self.db.document(f"users/{uid}").collection(collection_name)
+    
+    async def create_user_profile(self, uid: str, user_data: Dict[str, Any]) -> bool:
+        """Create user profile document"""
         try:
             user_ref = self.get_user_document_ref(uid)
-            
-            # Ensure timestamps are set
-            profile_data['created_at'] = datetime.utcnow()
-            profile_data['updated_at'] = datetime.utcnow()
-            
-            # Initialize with default settings
-            if 'notification_settings' not in profile_data:
-                profile_data['notification_settings'] = {
-                    'push_notifications': True,
-                    'email_notifications': True,
-                    'task_reminders': 'all',
-                    'document_updates': 'important',
-                    'ai_suggestions': 'all',
-                    'marketing_emails': False,
-                    'security_alerts': True,
-                    'weekly_digest': True,
-                    'weekend_notifications': False,
-                    'created_at': datetime.utcnow()
-                }
-            
-            if 'user_preferences' not in profile_data:
-                profile_data['user_preferences'] = {
-                    'theme': 'light',
-                    'language': 'en',
-                    'currency': 'ZAR',
-                    'date_format': 'DD/MM/YYYY',
-                    'time_format': '24h',
-                    'default_view': 'home',
-                    'auto_save': True,
-                    'analytics_enabled': True,
-                    'created_at': datetime.utcnow()
-                }
-            
-            user_ref.set(profile_data)
-            print(f"✅ User profile created for {uid}")
+            user_data['uid'] = uid
+            user_data['created_at'] = datetime.utcnow()
+            user_data['updated_at'] = datetime.utcnow()
+            user_ref.set(user_data)
+            print(f"✅ Created user profile for {uid}")
             return True
             
         except Exception as e:
@@ -109,142 +105,327 @@ class FirebaseService:
             return False
     
     async def get_user_profile(self, uid: str) -> Optional[Dict[str, Any]]:
-        """Get user profile from Firestore and build avatar URL"""
+        """Get user profile data"""
         try:
             user_ref = self.get_user_document_ref(uid)
             doc = user_ref.get()
             
             if doc.exists:
-                profile_data = doc.to_dict()
+                user_data = doc.to_dict()
                 
-                # Build avatar URL from filename if exists
-                avatar_filename = profile_data.get('avatar_filename')
-                if avatar_filename:
-                    profile_data['avatar_url'] = self.build_avatar_url(avatar_filename)
-                else:
-                    # Check for legacy avatar_url and convert to filename
-                    legacy_url = profile_data.get('avatar_url')
-                    if legacy_url:
-                        filename = self.extract_filename_from_url(legacy_url)
-                        if filename:
-                            profile_data['avatar_filename'] = filename
-                            profile_data['avatar_url'] = self.build_avatar_url(filename)
-                            # Update database to store filename instead of URL
-                            await self.update_user_profile(uid, {'avatar_filename': filename})
+                # Handle avatar URL building from filename
+                if 'avatar_filename' in user_data and user_data['avatar_filename']:
+                    user_data['avatar_url'] = self.build_avatar_url(user_data['avatar_filename'])
                 
-                return profile_data
-            
-            return None
-            
+                return user_data
+            else:
+                print(f"⚠️ User profile not found for {uid}")
+                return None
+                
         except Exception as e:
             print(f"❌ Failed to get user profile: {e}")
             return None
     
     async def update_user_profile(self, uid: str, update_data: Dict[str, Any]) -> bool:
-        """Update user profile in Firestore"""
+        """Update user profile with new data"""
         try:
             user_ref = self.get_user_document_ref(uid)
-            
-            # Always update timestamp
             update_data['updated_at'] = datetime.utcnow()
-            
-            # Handle avatar URL -> filename conversion
-            if 'avatar_url' in update_data:
-                avatar_url = update_data.pop('avatar_url')  # Remove URL from update
-                filename = self.extract_filename_from_url(avatar_url)
-                if filename:
-                    update_data['avatar_filename'] = filename
-            
             user_ref.update(update_data)
-            print(f"✅ User profile updated for {uid}")
+            print(f"✅ Updated user profile for {uid}")
             return True
             
         except Exception as e:
             print(f"❌ Failed to update user profile: {e}")
             return False
     
-    async def delete_user_profile(self, uid: str) -> bool:
-        """Delete user profile from Firestore"""
+    async def update_user_avatar(self, uid: str, avatar_filename: str) -> bool:
+        """Update user avatar filename"""
         try:
             user_ref = self.get_user_document_ref(uid)
-            user_ref.delete()
-            print(f"✅ User profile deleted for {uid}")
+            user_ref.update({
+                'avatar_filename': avatar_filename,
+                'updated_at': datetime.utcnow()
+            })
+            print(f"✅ Updated avatar for user {uid}")
             return True
             
         except Exception as e:
-            print(f"❌ Failed to delete user profile: {e}")
+            print(f"❌ Failed to update user avatar: {e}")
+            return False
+    
+    async def update_last_login(self, uid: str) -> bool:
+        """Update user's last login timestamp"""
+        try:
+            user_ref = self.get_user_document_ref(uid)
+            user_ref.update({
+                'last_login': datetime.utcnow(),
+                'updated_at': datetime.utcnow()
+            })
+            return True
+            
+        except Exception as e:
+            print(f"❌ Failed to update last login: {e}")
             return False
     
     # ============================================================================
-    # USER SUBCOLLECTIONS OPERATIONS
+    # DOCUMENT OPERATIONS - FIXED create_document METHOD
     # ============================================================================
     
-    def get_user_collection_ref(self, uid: str, collection_name: str):
-        """Get reference to user's subcollection"""
-        return self.db.collection(f"users/{uid}/{collection_name}")
-    
-    async def add_to_user_collection(self, uid: str, collection_name: str, data: Dict[str, Any]) -> Optional[str]:
-        """Add document to user's subcollection"""
+    async def create_document(self, collection: str, data: Dict[str, Any], doc_id: Optional[str] = None) -> str:
+        """Create a new document in Firestore - FIXED METHOD"""
         try:
-            collection_ref = self.get_user_collection_ref(uid, collection_name)
+            if not self.db:
+                raise Exception("Firebase not initialized")
             
-            # Add metadata
-            data['user_id'] = uid
-            data['created_at'] = datetime.utcnow()
-            data['updated_at'] = datetime.utcnow()
+            # Add timestamps
+            now = datetime.utcnow()
+            data["created_at"] = now
+            data["updated_at"] = now
             
-            # Add document and return ID
-            timestamp, doc_ref = collection_ref.add(data)
-            print(f"✅ Added document to {uid}/{collection_name}: {doc_ref.id}")
-            return doc_ref.id
+            # Generate ID if not provided
+            if not doc_id:
+                doc_id = str(uuid.uuid4())
+            
+            # Add the document ID to the data
+            data["id"] = doc_id
+            
+            # Create the document
+            doc_ref = self.db.collection(collection).document(doc_id)
+            doc_ref.set(data)
+            
+            return doc_id
             
         except Exception as e:
-            print(f"❌ Failed to add to user collection {collection_name}: {e}")
-            return None
+            print(f"Error creating document in {collection}: {e}")
+            raise Exception(f"Failed to create document: {e}")
     
-    async def get_user_collection(self, uid: str, collection_name: str, limit: int = 100, order_by: str = 'created_at') -> List[Dict[str, Any]]:
-        """Get documents from user's subcollection"""
+    async def get_document(self, collection: str, doc_id: str) -> Dict[str, Any]:
+        """Get a document from Firestore"""
         try:
-            collection_ref = self.get_user_collection_ref(uid, collection_name)
+            if not self.db:
+                raise Exception("Firebase not initialized")
             
-            # Build query with ordering and limit
-            query = collection_ref.order_by(order_by, direction=firestore.Query.DESCENDING).limit(limit)
+            doc_ref = self.db.collection(collection).document(doc_id)
+            doc = doc_ref.get()
+            
+            if doc.exists:
+                data = doc.to_dict()
+                data["id"] = doc.id
+                return data
+            else:
+                raise Exception(f"Document {doc_id} not found in {collection}")
+                
+        except Exception as e:
+            print(f"Error getting document {doc_id} from {collection}: {e}")
+            raise Exception(f"Failed to get document: {e}")
+    
+    async def update_document(self, collection: str, doc_id: str, data: Dict[str, Any]) -> bool:
+        """Update a document in Firestore"""
+        try:
+            if not self.db:
+                raise Exception("Firebase not initialized")
+            
+            # Add update timestamp
+            data["updated_at"] = datetime.utcnow()
+            
+            doc_ref = self.db.collection(collection).document(doc_id)
+            doc_ref.update(data)
+            
+            return True
+            
+        except Exception as e:
+            print(f"Error updating document {doc_id} in {collection}: {e}")
+            raise Exception(f"Failed to update document: {e}")
+    
+    async def delete_document(self, collection: str, doc_id: str) -> bool:
+        """Delete a document from Firestore"""
+        try:
+            if not self.db:
+                raise Exception("Firebase not initialized")
+            
+            doc_ref = self.db.collection(collection).document(doc_id)
+            doc_ref.delete()
+            
+            return True
+            
+        except Exception as e:
+            print(f"Error deleting document {doc_id} from {collection}: {e}")
+            raise Exception(f"Failed to delete document: {e}")
+    
+    async def query_documents(
+        self, 
+        collection: str, 
+        filters: Optional[List[tuple]] = None,
+        order_by: Optional[str] = None,
+        limit: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """Query documents from Firestore with filters"""
+        try:
+            if not self.db:
+                raise Exception("Firebase not initialized")
+            
+            query = self.db.collection(collection)
+            
+            # Apply filters
+            if filters:
+                for field, operator, value in filters:
+                    query = query.where(field, operator, value)
+            
+            # Apply ordering
+            if order_by:
+                if order_by.startswith('-'):
+                    # Descending order
+                    field = order_by[1:]
+                    query = query.order_by(field, direction=firestore.Query.DESCENDING)
+                else:
+                    # Ascending order
+                    query = query.order_by(order_by)
+            
+            # Apply limit
+            if limit:
+                query = query.limit(limit)
+            
+            # Execute query
             docs = query.stream()
             
             results = []
             for doc in docs:
-                doc_data = doc.to_dict()
-                doc_data['id'] = doc.id
-                results.append(doc_data)
+                data = doc.to_dict()
+                data["id"] = doc.id
+                results.append(data)
             
             return results
             
         except Exception as e:
-            print(f"❌ Failed to get user collection {collection_name}: {e}")
+            print(f"Error querying documents from {collection}: {e}")
+            raise Exception(f"Failed to query documents: {e}")
+    
+    async def get_user_documents(
+        self, 
+        user_id: str, 
+        collection: str, 
+        limit: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """Get documents for a specific user"""
+        try:
+            filters = [("user_id", "==", user_id)]
+            return await self.query_documents(
+                collection=collection,
+                filters=filters,
+                order_by="-updated_at",
+                limit=limit
+            )
+        except Exception as e:
+            print(f"Error getting user documents: {e}")
             return []
     
+    async def verify_document_ownership(
+        self, 
+        collection: str, 
+        doc_id: str, 
+        user_id: str
+    ) -> bool:
+        """Verify that a user owns a document"""
+        try:
+            doc = await self.get_document(collection, doc_id)
+            return doc.get("user_id") == user_id
+        except Exception:
+            return False
+    
+    # ============================================================================
+    # USER SUBCOLLECTION OPERATIONS
+    # ============================================================================
+    
+    async def create_user_document(self, uid: str, collection_name: str, data: Dict[str, Any], doc_id: str = None) -> str:
+        """Create document in user's subcollection"""
+        try:
+            if not doc_id:
+                doc_id = str(uuid.uuid4())
+            
+            # Add metadata
+            data['id'] = doc_id
+            data['user_id'] = uid
+            data['created_at'] = datetime.utcnow()
+            data['updated_at'] = datetime.utcnow()
+            
+            collection_ref = self.get_user_collection_ref(uid, collection_name)
+            doc_ref = collection_ref.document(doc_id)
+            doc_ref.set(data)
+            
+            print(f"✅ Created document {doc_id} in {uid}/{collection_name}")
+            return doc_id
+            
+        except Exception as e:
+            print(f"❌ Failed to create user document: {e}")
+            raise e
+    
     async def get_user_document(self, uid: str, collection_name: str, doc_id: str) -> Optional[Dict[str, Any]]:
-        """Get specific document from user's subcollection"""
+        """Get document from user's subcollection"""
         try:
             doc_ref = self.get_user_collection_ref(uid, collection_name).document(doc_id)
             doc = doc_ref.get()
             
             if doc.exists:
-                doc_data = doc.to_dict()
-                doc_data['id'] = doc.id
-                return doc_data
-            
-            return None
-            
+                data = doc.to_dict()
+                data['id'] = doc.id
+                return data
+            else:
+                return None
+                
         except Exception as e:
             print(f"❌ Failed to get user document: {e}")
             return None
     
+    async def query_user_documents(
+        self,
+        uid: str,
+        collection_name: str,
+        where_conditions: List[tuple] = None,
+        order_by: str = None,
+        limit: int = None
+    ) -> List[Dict[str, Any]]:
+        """Query documents from user's subcollection"""
+        try:
+            collection_ref = self.get_user_collection_ref(uid, collection_name)
+            query = collection_ref
+            
+            # Apply where conditions
+            if where_conditions:
+                for field, operator, value in where_conditions:
+                    query = query.where(field, operator, value)
+            
+            # Apply ordering
+            if order_by:
+                if order_by.startswith('-'):
+                    field = order_by[1:]
+                    query = query.order_by(field, direction=firestore.Query.DESCENDING)
+                else:
+                    query = query.order_by(order_by)
+            
+            # Apply limit
+            if limit:
+                query = query.limit(limit)
+            
+            # Execute query
+            docs = query.stream()
+            results = []
+            for doc in docs:
+                data = doc.to_dict()
+                data['id'] = doc.id
+                results.append(data)
+            
+            return results
+            
+        except Exception as e:
+            print(f"❌ Failed to query user documents: {e}")
+            return []
+    
     async def update_user_document(self, uid: str, collection_name: str, doc_id: str, data: Dict[str, Any]) -> bool:
         """Update document in user's subcollection"""
         try:
-            doc_ref = self.get_user_collection_ref(uid, collection_name).document(doc_id)
             data['updated_at'] = datetime.utcnow()
+            doc_ref = self.get_user_collection_ref(uid, collection_name).document(doc_id)
             doc_ref.update(data)
             print(f"✅ Updated document {doc_id} in {uid}/{collection_name}")
             return True
@@ -315,35 +496,40 @@ class FirebaseService:
             
         except Exception as e:
             print(f"❌ Failed to get notification settings: {e}")
-            return {'uid': uid}
+            return {}
     
     async def update_notification_settings(self, uid: str, settings: Dict[str, Any]) -> bool:
         """Update user notification settings"""
         try:
-            settings['updated_at'] = datetime.utcnow()
-            return await self.update_user_profile(uid, {'notification_settings': settings})
+            user_ref = self.get_user_document_ref(uid)
+            user_ref.update({
+                'notification_settings': settings,
+                'updated_at': datetime.utcnow()
+            })
+            print(f"✅ Updated notification settings for {uid}")
+            return True
             
         except Exception as e:
             print(f"❌ Failed to update notification settings: {e}")
             return False
     
     # ============================================================================
-    # USER PREFERENCES
+    # PREFERENCES OPERATIONS
     # ============================================================================
     
     async def get_user_preferences(self, uid: str) -> Dict[str, Any]:
-        """Get user app preferences"""
+        """Get user preferences"""
         try:
             user_profile = await self.get_user_profile(uid)
-            if user_profile and 'user_preferences' in user_profile:
-                preferences = user_profile['user_preferences']
-                preferences['uid'] = uid
-                return preferences
+            if user_profile and 'preferences' in user_profile:
+                prefs = user_profile['preferences']
+                prefs['uid'] = uid
+                return prefs
             
             # Return default preferences
             return {
                 'uid': uid,
-                'theme': 'light',
+                'theme': 'auto',
                 'language': 'en',
                 'currency': 'ZAR',
                 'date_format': 'DD/MM/YYYY',
@@ -356,144 +542,28 @@ class FirebaseService:
             
         except Exception as e:
             print(f"❌ Failed to get user preferences: {e}")
-            return {'uid': uid}
+            return {}
     
     async def update_user_preferences(self, uid: str, preferences: Dict[str, Any]) -> bool:
-        """Update user app preferences"""
+        """Update user preferences"""
         try:
-            preferences['updated_at'] = datetime.utcnow()
-            return await self.update_user_profile(uid, {'user_preferences': preferences})
+            user_ref = self.get_user_document_ref(uid)
+            user_ref.update({
+                'preferences': preferences,
+                'updated_at': datetime.utcnow()
+            })
+            print(f"✅ Updated preferences for {uid}")
+            return True
             
         except Exception as e:
-            print(f"❌ Failed to update user preferences: {e}")
+            print(f"❌ Failed to update preferences: {e}")
             return False
     
     # ============================================================================
-    # STATISTICS AND ANALYTICS
+    # AUTHENTICATION OPERATIONS
     # ============================================================================
     
-    async def get_user_stats(self, uid: str) -> Dict[str, Any]:
-        """Get comprehensive user activity statistics"""
-        try:
-            # Count documents in various subcollections
-            tasks_total = await self.count_user_collection(uid, "tasks")
-            tasks_completed = await self.count_user_collection(uid, "tasks", [("status", "==", "completed")])
-            tasks_pending = await self.count_user_collection(uid, "tasks", [("status", "==", "pending")])
-            
-            documents_created = await self.count_user_collection(uid, "documents")
-            ai_conversations = await self.count_user_collection(uid, "conversations")
-            notes_created = await self.count_user_collection(uid, "notes")
-            
-            # Get user profile for account age
-            user_profile = await self.get_user_profile(uid)
-            account_age_days = 1
-            last_activity = None
-            
-            if user_profile:
-                created_at = user_profile.get('created_at')
-                if created_at:
-                    if isinstance(created_at, str):
-                        try:
-                            created_date = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
-                            account_age_days = max(1, (datetime.utcnow() - created_date).days)
-                        except ValueError:
-                            pass
-                    elif isinstance(created_at, datetime):
-                        account_age_days = max(1, (datetime.utcnow() - created_at).days)
-                
-                # Get last activity
-                last_login = user_profile.get('last_login') or user_profile.get('updated_at')
-                if last_login:
-                    if isinstance(last_login, str):
-                        try:
-                            last_activity = datetime.fromisoformat(last_login.replace('Z', '+00:00'))
-                        except ValueError:
-                            pass
-                    elif isinstance(last_login, datetime):
-                        last_activity = last_login
-            
-            # Calculate estimated hours saved
-            hours_saved = round(
-                (tasks_completed * 0.25) +  # 15 min per task
-                (documents_created * 0.5) +  # 30 min per document
-                (ai_conversations * 0.17) +  # 10 min per conversation
-                (notes_created * 0.08),      # 5 min per note
-                1
-            )
-            
-            # Calculate streak (simple version)
-            streak_days = 0
-            if last_activity:
-                days_since_activity = (datetime.utcnow() - last_activity).days
-                if days_since_activity <= 1:
-                    streak_days = min(account_age_days, 7)  # Max 7 day streak
-            
-            return {
-                'uid': uid,
-                'tasks_completed': tasks_completed,
-                'tasks_pending': tasks_pending,
-                'tasks_total': tasks_total,
-                'documents_created': documents_created,
-                'ai_conversations': ai_conversations,
-                'notes_created': notes_created,
-                'hours_saved': hours_saved,
-                'last_activity': last_activity,
-                'streak_days': streak_days,
-                'account_age_days': account_age_days,
-                'total_login_days': min(account_age_days, 30)  # Estimate
-            }
-            
-        except Exception as e:
-            print(f"❌ Failed to get user stats: {e}")
-            return {'uid': uid}
-    
-    async def get_user_activity_summary(self, uid: str, days: int = 30) -> Dict[str, Any]:
-        """Get user activity summary for specified period"""
-        try:
-            end_date = datetime.utcnow()
-            start_date = end_date - timedelta(days=days)
-            
-            # Count recent activities
-            recent_tasks = await self.count_user_collection(
-                uid, "tasks", 
-                [("updated_at", ">=", start_date)]
-            )
-            
-            recent_documents = await self.count_user_collection(
-                uid, "documents",
-                [("created_at", ">=", start_date)]
-            )
-            
-            recent_conversations = await self.count_user_collection(
-                uid, "conversations",
-                [("created_at", ">=", start_date)]
-            )
-            
-            return {
-                "period_days": days,
-                "tasks_activity": recent_tasks,
-                "documents_created": recent_documents,
-                "ai_conversations": recent_conversations,
-                "total_activity": recent_tasks + recent_documents + recent_conversations,
-                "start_date": start_date,
-                "end_date": end_date
-            }
-            
-        except Exception as e:
-            print(f"❌ Failed to get activity summary: {e}")
-            return {
-                "period_days": days,
-                "tasks_activity": 0,
-                "documents_created": 0,
-                "ai_conversations": 0,
-                "total_activity": 0
-            }
-    
-    # ============================================================================
-    # TOKEN OPERATIONS (for auth service integration)
-    # ============================================================================
-    
-    def verify_token(self, id_token: str) -> Dict[str, Any]:
+    def verify_id_token(self, id_token: str) -> Dict[str, Any]:
         """Verify Firebase ID token"""
         try:
             decoded_token = auth.verify_id_token(id_token)

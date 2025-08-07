@@ -1,3 +1,4 @@
+# services/ai_service.py - COMPLETE FIXED VERSION WITH ALL YOUR FUNCTIONALITY
 import google.generativeai as genai
 from typing import List, Dict, Any, Optional
 from datetime import datetime
@@ -6,7 +7,6 @@ import time
 import json
 import re
 import uuid
-
 
 from models.chat_models import ChatMessage, ChatResponse, MessageHistory, MessageRole, MessageType, AIContext
 from services.firebase_service import FirebaseService
@@ -35,13 +35,17 @@ class AIService:
             # Use fallback mock response for development
             self.model = None
     
-    async def process_message(self, message: ChatMessage, user_id: str) -> ChatResponse:
-        """Process user message and return AI response"""
+    async def process_message(self, message: ChatMessage, user_id: str, conversation_id: Optional[str] = None) -> ChatResponse:
+        """Process user message and return AI response with conversation context - FIXED VERSION"""
         try:
             start_time = time.time()
             
-            # Get user context
-            context = await self._get_user_context(user_id)
+            # Create conversation if not provided
+            if not conversation_id:
+                conversation_id = await self.create_conversation_session(user_id)
+            
+            # Get user context with conversation history - FIXED: proper parameter passing
+            context = await self._get_user_context(user_id, conversation_id)
             
             # Build prompt with context
             system_prompt = self._build_system_prompt(context)
@@ -51,7 +55,6 @@ class AIService:
             if self.model:
                 response = await self._generate_ai_response(full_prompt)
             else:
-                # Fallback mock response
                 response = await self._generate_mock_response(message.content)
             
             processing_time = time.time() - start_time
@@ -59,10 +62,13 @@ class AIService:
             # Parse response for special actions
             parsed_response = self._parse_ai_response(response)
             
-            # Save message history
+            # Save message history with conversation context
             if self.firebase_service:
-                await self._save_message_history(user_id, message.content, response, processing_time)
+                await self._save_message_history(
+                    user_id, message.content, response, processing_time, conversation_id
+                )
             
+            # Return complete ChatResponse with all fields
             return ChatResponse(
                 content=parsed_response["content"],
                 message_type=MessageType(parsed_response.get("message_type", "text")),
@@ -80,6 +86,7 @@ class AIService:
             )
             
         except Exception as e:
+            print(f"Error in process_message: {e}")
             return ChatResponse(
                 content=f"I apologize, but I'm having trouble processing your request right now. Error: {str(e)}",
                 message_type=MessageType.TEXT,
@@ -218,8 +225,8 @@ Example format:
         
         return parsed
     
-    async def _get_user_context(self, user_id: str) -> AIContext:
-        """Get user context for AI conversation"""
+    async def _get_user_context(self, user_id: str, conversation_id: Optional[str] = None) -> AIContext:
+        """Get user context for AI conversation - FIXED METHOD SIGNATURE"""
         try:
             context = AIContext(
                 current_time=datetime.now(),
@@ -234,9 +241,13 @@ Example format:
                     context.user_location = user_profile.get("location", context.user_location)
                     context.user_timezone = user_profile.get("timezone", context.user_timezone)
                 
-                # Get recent conversation history
-                recent_messages = await self.get_chat_history(user_id, limit=5)
-                context.conversation_history = recent_messages
+                # Get recent conversation history - use conversation_id if provided
+                if conversation_id:
+                    recent_messages = await self.get_conversation_messages(user_id, conversation_id)
+                    context.conversation_history = recent_messages[-5:] if recent_messages else []
+                else:
+                    recent_messages = await self.get_chat_history(user_id, limit=5)
+                    context.conversation_history = recent_messages
                 
                 # Get recent documents and tasks
                 recent_docs = await self.firebase_service.get_user_documents(
@@ -252,6 +263,7 @@ Example format:
             return context
             
         except Exception as e:
+            print(f"Error getting user context: {e}")
             # Return default context if error
             return AIContext(
                 current_time=datetime.now(),
@@ -264,18 +276,24 @@ Example format:
         user_id: str, 
         user_message: str, 
         ai_response: str, 
-        processing_time: float
+        processing_time: float,
+        conversation_id: Optional[str] = None
     ):
-        """Save conversation to message history"""
+        """Save conversation to message history with conversation context"""
         try:
             if not self.firebase_service:
                 return
+            
+            # Generate conversation_id if not provided
+            if not conversation_id:
+                conversation_id = await self.create_conversation_session(user_id)
             
             timestamp = datetime.utcnow()
             
             # Save user message
             user_msg_data = {
                 "user_id": user_id,
+                "conversation_id": conversation_id,
                 "role": MessageRole.USER.value,
                 "content": user_message,
                 "message_type": MessageType.TEXT.value,
@@ -289,6 +307,7 @@ Example format:
             # Save AI response
             ai_msg_data = {
                 "user_id": user_id,
+                "conversation_id": conversation_id,
                 "role": MessageRole.ASSISTANT.value,
                 "content": ai_response,
                 "message_type": MessageType.TEXT.value,
@@ -299,8 +318,47 @@ Example format:
             
             await self.firebase_service.create_document("chat_history", ai_msg_data)
             
+            # Update conversation metadata
+            await self._update_conversation_metadata(user_id, conversation_id, ai_response)
+            
         except Exception as e:
             print(f"Failed to save message history: {e}")
+    
+    async def _update_conversation_metadata(self, user_id: str, conversation_id: str, last_message: str):
+        """Update conversation metadata with latest info"""
+        try:
+            if not self.firebase_service:
+                return
+            
+            # Generate a title from the first few words if it's still "New Chat"
+            title = "New Chat"
+            if len(last_message) > 10:
+                title = last_message[:50] + "..." if len(last_message) > 50 else last_message
+                # Clean up the title
+                title = title.split('.')[0]  # Take first sentence
+                if len(title) < 10:
+                    title = last_message[:30] + "..."
+            
+            # Find and update the conversation
+            conversations = await self.firebase_service.query_documents(
+                "conversations",
+                filters=[
+                    ("user_id", "==", user_id),
+                    ("conversation_id", "==", conversation_id)
+                ]
+            )
+            
+            if conversations:
+                conv_id = conversations[0]["id"]
+                update_data = {
+                    "updated_at": datetime.utcnow(),
+                    "title": title,
+                    "message_count": conversations[0].get("message_count", 0) + 2  # +2 for user and AI message
+                }
+                await self.firebase_service.update_document("conversations", conv_id, update_data)
+        
+        except Exception as e:
+            print(f"Failed to update conversation metadata: {e}")
     
     async def get_chat_history(self, user_id: str, limit: int = 50) -> List[MessageHistory]:
         """Get user's chat history"""
@@ -343,10 +401,13 @@ Example format:
             print(f"Failed to clear chat history: {e}")
             return False
     
-    async def get_conversation_summary(self, user_id: str) -> Dict[str, Any]:
+    async def get_conversation_summary(self, user_id: str, conversation_id: Optional[str] = None) -> Dict[str, Any]:
         """Get conversation summary for user"""
         try:
-            messages = await self.get_chat_history(user_id, limit=100)
+            if conversation_id:
+                messages = await self.get_conversation_messages(user_id, conversation_id)
+            else:
+                messages = await self.get_chat_history(user_id, limit=100)
             
             if not messages:
                 return {
@@ -435,20 +496,25 @@ Example format:
             
             # Add recent message preview for each conversation
             for conv in conversations:
-                recent_message = await self.firebase_service.query_documents(
-                    "chat_history",
-                    filters=[
-                        ("user_id", "==", user_id),
-                        ("conversation_id", "==", conv.get("conversation_id"))
-                    ],
-                    order_by="-timestamp",
-                    limit=1
-                )
-                
-                if recent_message:
-                    conv["last_message"] = recent_message[0]["content"][:100] + "..."
-                    conv["last_message_at"] = recent_message[0]["timestamp"]
-                else:
+                try:
+                    recent_message = await self.firebase_service.query_documents(
+                        "chat_history",
+                        filters=[
+                            ("user_id", "==", user_id),
+                            ("conversation_id", "==", conv.get("conversation_id"))
+                        ],
+                        order_by="-timestamp",
+                        limit=1
+                    )
+                    
+                    if recent_message:
+                        conv["last_message"] = recent_message[0]["content"][:100] + "..."
+                        conv["last_message_at"] = recent_message[0]["timestamp"]
+                    else:
+                        conv["last_message"] = "Start chatting..."
+                        conv["last_message_at"] = conv["created_at"]
+                except Exception as e:
+                    print(f"Error getting recent message for conversation: {e}")
                     conv["last_message"] = "Start chatting..."
                     conv["last_message_at"] = conv["created_at"]
             
@@ -544,141 +610,3 @@ Example format:
         except Exception as e:
             print(f"Failed to get chat stats: {e}")
             return {"total_conversations": 0, "total_messages": 0, "messages_today": 0}
-    
-    async def _save_message_history(
-    self, 
-    user_id: str, 
-    user_message: str, 
-    ai_response: str, 
-    processing_time: float,
-    conversation_id: Optional[str] = None
-):
-        """Save conversation to message history with conversation context"""
-        try:
-            if not self.firebase_service:
-                return
-            
-            # Generate conversation_id if not provided
-            if not conversation_id:
-                conversation_id = await self.create_conversation_session(user_id)
-            
-            timestamp = datetime.utcnow()
-            
-            # Save user message
-            user_msg_data = {
-                "user_id": user_id,
-                "conversation_id": conversation_id,
-                "role": MessageRole.USER.value,
-                "content": user_message,
-                "message_type": MessageType.TEXT.value,
-                "timestamp": timestamp,
-                "processing_time": None,
-                "context": {}
-            }
-            
-            await self.firebase_service.create_document("chat_history", user_msg_data)
-            
-            # Save AI response
-            ai_msg_data = {
-                "user_id": user_id,
-                "conversation_id": conversation_id,
-                "role": MessageRole.ASSISTANT.value,
-                "content": ai_response,
-                "message_type": MessageType.TEXT.value,
-                "timestamp": timestamp,
-                "processing_time": processing_time,
-                "context": {}
-            }
-            
-            await self.firebase_service.create_document("chat_history", ai_msg_data)
-            
-            # Update conversation metadata
-            await self._update_conversation_metadata(user_id, conversation_id, ai_response)
-            
-        except Exception as e:
-            print(f"Failed to save message history: {e}")
-    
-    async def _update_conversation_metadata(self, user_id: str, conversation_id: str, last_message: str):
-        """Update conversation metadata with latest info"""
-        try:
-            if not self.firebase_service:
-                return
-            
-            # Generate a title from the first few words if it's still "New Chat"
-            title = "New Chat"
-            if len(last_message) > 10:
-                title = last_message[:50] + "..." if len(last_message) > 50 else last_message
-                # Clean up the title
-                title = title.split('.')[0]  # Take first sentence
-                if len(title) < 10:
-                    title = last_message[:30] + "..."
-            
-            # Find and update the conversation
-            conversations = await self.firebase_service.query_documents(
-                "conversations",
-                filters=[
-                    ("user_id", "==", user_id),
-                    ("conversation_id", "==", conversation_id)
-                ]
-            )
-            
-            if conversations:
-                conv_id = conversations[0]["id"]
-                update_data = {
-                    "updated_at": datetime.utcnow(),
-                    "title": title,
-                    "message_count": conversations[0].get("message_count", 0) + 2  # +2 for user and AI message
-                }
-                await self.firebase_service.update_document("conversations", conv_id, update_data)
-        
-        except Exception as e:
-            print(f"Failed to update conversation metadata: {e}")
-    
-    async def process_message(self, message: ChatMessage, user_id: str, conversation_id: Optional[str] = None) -> ChatResponse:
-        """Process user message and return AI response with conversation context"""
-        try:
-            start_time = time.time()
-            
-            # Create conversation if not provided
-            if not conversation_id:
-                conversation_id = await self.create_conversation_session(user_id)
-            
-            # Get user context with conversation history
-            context = await self._get_user_context(user_id, conversation_id)
-            
-            # Build prompt with context
-            system_prompt = self._build_system_prompt(context)
-            full_prompt = f"{system_prompt}\n\nUser message: {message.content}"
-            
-            # Generate AI response
-            if self.model:
-                response = await self._generate_ai_response(full_prompt)
-            else:
-                response = await self._generate_mock_response(message.content)
-            
-            processing_time = time.time() - start_time
-            
-            # Parse response for special actions
-            parsed_response = self._parse_ai_response(response)
-            
-            # Save message history with conversation context
-            if self.firebase_service:
-                await self._save_message_history(
-                    user_id, message.content, response, processing_time, conversation_id
-                )
-            
-            # Add conversation_id to response
-            chat_response = ChatResponse(
-                content=response,
-                processing_time=processing_time,
-                **parsed_response
-            )
-            
-            return chat_response
-            
-        except Exception as e:
-            print(f"Error in process_message: {e}")
-            return ChatResponse(
-                content="I apologize, but I'm having trouble processing your message right now. Please try again.",
-                processing_time=0.0
-            )
