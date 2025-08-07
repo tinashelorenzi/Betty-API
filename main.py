@@ -27,7 +27,7 @@ from models.user_models import (
     NotificationSettings, UserPreferences
 )
 from models.document_models import DocumentCreate, DocumentResponse, DocumentUpdate
-from models.chat_models import ChatMessage, ChatResponse, EnhancedChatResponse
+from models.chat_models import ChatMessage, ChatResponse, EnhancedChatResponse, EnhancedChatMessage
 from models.planner_models import TaskCreate, TaskResponse, TaskUpdate, NoteCreate, NoteResponse
 
 # Initialize services
@@ -409,7 +409,7 @@ async def get_google_connection_status(user=Depends(get_current_user)):
 
 @app.post("/chat/message", response_model=EnhancedChatResponse)
 async def send_chat_message(
-    message: ChatMessage,
+    message: EnhancedChatMessage,  # ✅ FIXED: Use EnhancedChatMessage instead of ChatMessage
     conversation_id: Optional[str] = Query(None, description="Optional conversation ID"),
     user=Depends(get_current_user)
 ):
@@ -418,7 +418,7 @@ async def send_chat_message(
         user_id = user["uid"]
         
         # Get or create conversation - handle both query param and message body
-        if not conversation_id and not message.conversation_id:
+        if not conversation_id and not getattr(message, 'conversation_id', None):
             conversation_id = await ai_service.create_conversation_session_indexed(user_id)
         elif conversation_id:
             # Use conversation_id from query parameter
