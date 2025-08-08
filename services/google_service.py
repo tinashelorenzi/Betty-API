@@ -17,14 +17,13 @@ class GoogleService:
         self.firebase_service = firebase_service
         self.client_id = os.getenv("GOOGLE_CLIENT_ID")
         self.client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
-        self.redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8000/auth/google/callback")
+        self.redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", "https://b5e976209bb6dba3f756790b6fbff86a.serveo.net/auth/google/callback")
         
         # OAuth scopes for Google Workspace
         self.scopes = [
             'https://www.googleapis.com/auth/drive.file',
             'https://www.googleapis.com/auth/documents',
             'https://www.googleapis.com/auth/calendar',
-            'https://www.googleapis.com/auth/keep',  # Note: Keep API is limited
             'https://www.googleapis.com/auth/userinfo.email',
             'https://www.googleapis.com/auth/userinfo.profile'
         ]
@@ -53,7 +52,8 @@ class GoogleService:
             authorization_url, state = flow.authorization_url(
                 access_type='offline',
                 include_granted_scopes='true',
-                state=user_id  # Pass user_id as state parameter
+                state=user_id,  # Pass user_id as state parameter
+                prompt='consent'
             )
             
             return authorization_url

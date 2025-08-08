@@ -74,7 +74,17 @@ app = FastAPI(
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 # CORS middleware
-allowed_origins = os.getenv("ALLOWED_ORIGINS", "*").split(",")
+allowed_origins = [
+    "http://localhost:3000",      # React web apps
+    "http://localhost:8080",      # Alternative React port
+    "http://localhost:8081",      # Expo web default port
+    "http://127.0.0.1:3000",      # Alternative localhost
+    "http://127.0.0.1:8080",      # Alternative localhost
+    "http://127.0.0.1:8081",      # Alternative localhost
+    "exp://localhost:8081",       # Expo specific
+    "exp://127.0.0.1:8081",       # Expo specific
+    "*"                           # Allow all origins (development only)
+]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
@@ -706,6 +716,112 @@ async def get_document(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/auth/google/mobile-redirect")
+async def google_mobile_redirect(code: str = None, state: str = None, error: str = None):
+    """Handle Google OAuth mobile redirect from Serveo tunnel"""
+    try:
+        if error:
+            # Handle OAuth error
+            error_html = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Authentication Error</title>
+                <meta name="viewport" content="width=device-width, initial-scale=1">
+            </head>
+            <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+                <h1>Authentication Failed</h1>
+                <p>Error: {error}</p>
+                <p>Please close this window and try again.</p>
+                <script>
+                    // Try to close the window after 3 seconds
+                    setTimeout(() => {{
+                        window.close();
+                    }}, 3000);
+                </script>
+            </body>
+            </html>
+            """
+            return HTMLResponse(content=error_html, status_code=400)
+        
+        if not code:
+            # No code provided
+            error_html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Authentication Error</title>
+                <meta name="viewport" content="width=device-width, initial-scale=1">
+            </head>
+            <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+                <h1>Authentication Error</h1>
+                <p>No authorization code received.</p>
+                <p>Please close this window and try again.</p>
+                <script>
+                    setTimeout(() => {
+                        window.close();
+                    }, 3000);
+                </script>
+            </body>
+            </html>
+            """
+            return HTMLResponse(content=error_html, status_code=400)
+        
+        # Success - show a page that can be closed
+        success_html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Authentication Successful</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+        </head>
+        <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+            <h1>✅ Authentication Successful!</h1>
+            <p>You can now close this window and return to the Betty app.</p>
+            <p>Authorization code: {code[:10]}...</p>
+            <script>
+                // Try to communicate back to the app if possible
+                if (window.ReactNativeWebView) {{
+                    window.ReactNativeWebView.postMessage(JSON.stringify({{
+                        type: 'GOOGLE_AUTH_SUCCESS',
+                        code: '{code}'
+                    }}));
+                }}
+                
+                // Auto-close after 5 seconds
+                setTimeout(() => {{
+                    window.close();
+                }}, 5000);
+                
+                // Also try to redirect back to the app
+                setTimeout(() => {{
+                    // This might work for some mobile browsers
+                    window.location.href = 'com.tinashelorenzi.bettyofficegenius://auth/google/success?code={code}';
+                }}, 1000);
+            </script>
+        </body>
+        </html>
+        """
+        return HTMLResponse(content=success_html)
+        
+    except Exception as e:
+        print(f"Error in mobile redirect: {e}")
+        error_html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Server Error</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+        </head>
+        <body style="font-family: Arial, sans-serif; text-align: center; padding: 50px;">
+            <h1>Server Error</h1>
+            <p>Something went wrong: {str(e)}</p>
+            <p>Please close this window and try again.</p>
+        </body>
+        </html>
+        """
+        return HTMLResponse(content=error_html, status_code=500)
 
 @app.post("/auth/google/mobile-callback")
 async def google_mobile_oauth_callback(
