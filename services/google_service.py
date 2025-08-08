@@ -17,15 +17,16 @@ class GoogleService:
         self.firebase_service = firebase_service
         self.client_id = os.getenv("GOOGLE_CLIENT_ID")
         self.client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
-        self.redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", "https://b5e976209bb6dba3f756790b6fbff86a.serveo.net/auth/google/callback")
+        self.redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8000/auth/google/callback")
         
         # OAuth scopes for Google Workspace
         self.scopes = [
+            'openid',  # Add openid first to prevent scope mismatch
+            'https://www.googleapis.com/auth/userinfo.email',
+            'https://www.googleapis.com/auth/userinfo.profile',
             'https://www.googleapis.com/auth/drive.file',
             'https://www.googleapis.com/auth/documents',
-            'https://www.googleapis.com/auth/calendar',
-            'https://www.googleapis.com/auth/userinfo.email',
-            'https://www.googleapis.com/auth/userinfo.profile'
+            'https://www.googleapis.com/auth/calendar'
         ]
     
     # ========================================================================
@@ -275,32 +276,60 @@ class GoogleService:
     # GOOGLE DOCS API
     # ========================================================================
     
-    async def create_google_doc(
-        self, 
-        user_id: str, 
-        title: str, 
-        content: str
-    ) -> Dict[str, Any]:
-        """Create a new Google Document"""
+
+
+    async def check_google_connection_status(self, user_id: str) -> Dict[str, Any]:
+        """Check if user has a valid Google connection - FIXED METHOD NAME"""
         try:
             credentials = await self.get_user_credentials(user_id)
+            
             if not credentials:
-                raise ValueError("Google account not connected")
+                return {
+                    "connected": False,
+                    "user_info": None
+                }
             
+            # Get stored user info
+            tokens_doc = await self.firebase_service.get_document("google_tokens", user_id)
+            user_info = tokens_doc.get("google_user_info") if tokens_doc else None
+            
+            return {
+                "connected": True,
+                "user_info": {
+                    "email": user_info.get("email") if user_info else None,
+                    "name": user_info.get("name") if user_info else None,
+                    "picture": user_info.get("picture") if user_info else None
+                } if user_info else None
+            }
+            
+        except Exception as e:
+            print(f"Failed to check connection status: {e}")
+            return {
+                "connected": False,
+                "user_info": None
+            }
+
+    async def create_google_doc(self, user_id: str, title: str, content: str) -> Dict[str, Any]:
+        """Create a Google Doc with the provided content"""
+        try:
+            credentials = await self.get_user_credentials(user_id)
+            
+            if not credentials:
+                raise Exception("Google account not connected")
+            
+            # Create the document using Google Docs API
             docs_service = build('docs', 'v1', credentials=credentials)
-            drive_service = build('drive', 'v3', credentials=credentials)
-            
-            # Create the document
             doc = {
                 'title': title
             }
             
+            # Create the document
             document = docs_service.documents().create(body=doc).execute()
             document_id = document.get('documentId')
             
-            # Add content to the document
-            if content.strip():
-                requests = [
+            # Insert content into the document
+            requests_body = {
+                'requests': [
                     {
                         'insertText': {
                             'location': {
@@ -310,30 +339,26 @@ class GoogleService:
                         }
                     }
                 ]
-                
-                docs_service.documents().batchUpdate(
-                    documentId=document_id,
-                    body={'requests': requests}
-                ).execute()
-            
-            # Get the document URL
-            file_info = drive_service.files().get(
-                fileId=document_id,
-                fields="webViewLink,webContentLink"
-            ).execute()
-            
-            return {
-                "document_id": document_id,
-                "document_url": file_info.get("webViewLink"),
-                "download_url": file_info.get("webContentLink"),
-                "title": title,
-                "created_at": datetime.utcnow().isoformat(),
-                "success": True
             }
             
-        except HttpError as e:
-            raise Exception(f"Google Docs API error: {e}")
+            docs_service.documents().batchUpdate(
+                documentId=document_id,
+                body=requests_body
+            ).execute()
+            
+            # Generate the shareable URL
+            document_url = f"https://docs.google.com/document/d/{document_id}/edit"
+            
+            return {
+                "success": True,
+                "document_id": document_id,
+                "document_url": document_url,
+                "title": title,
+                "message": f"Document '{title}' created successfully"
+            }
+            
         except Exception as e:
+            print(f"Failed to create Google Doc: {e}")
             raise Exception(f"Failed to create Google Doc: {e}")
     
     async def update_google_doc(

@@ -900,6 +900,40 @@ async def export_document_to_google(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/google/drive/create-doc")
+async def create_google_drive_doc(
+    request: dict,
+    user=Depends(get_current_user)
+):
+    """Create a Google Doc in Drive with the provided content"""
+    try:
+        title = request.get("title", "Untitled Document")
+        content = request.get("content", "")
+        
+        result = await google_service.create_google_doc(
+            user["uid"], 
+            title, 
+            content
+        )
+        
+        return {
+            "success": True,
+            "document_id": result["document_id"],
+            "document_url": result["document_url"],
+            "title": title,
+            "message": "Document created successfully in Google Drive"
+        }
+        
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400, 
+            detail="Google account not connected. Please connect your Google account first."
+        )
+    except Exception as e:
+        print(f"Error creating Google Doc: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ============================================================================
 # PLANNER ROUTES
 # ============================================================================
