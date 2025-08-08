@@ -2,6 +2,7 @@ from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any
 from datetime import datetime
 from enum import Enum
+import os, re
 
 class DocumentType(str, Enum):
     """Enum for document types"""
@@ -86,3 +87,13 @@ class DocumentTemplate(BaseModel):
     template_content: str
     variables: list[str] = Field(default_factory=list)  # Variables that can be replaced
     is_public: bool = False
+
+class DocumentGenerationRequest(BaseModel):
+    document_name: str
+    user_id: str
+
+class FormattedGoogleDocRequest(BaseModel):
+    title: str
+    content: str  # Markdown content
+    format: bool = True
+    preserve_markdown: bool = True

@@ -29,7 +29,7 @@ from models.user_models import (
     UserCreate, UserResponse, UserUpdate, ProfileStats, 
     NotificationSettings, UserPreferences
 )
-from models.document_models import DocumentCreate, DocumentResponse, DocumentUpdate
+from models.document_models import DocumentCreate, DocumentResponse, DocumentUpdate, DocumentGenerationRequest, FormattedGoogleDocRequest
 from models.chat_models import ChatMessage, ChatResponse, EnhancedChatResponse, EnhancedChatMessage
 from models.planner_models import TaskCreate, TaskResponse, TaskUpdate, NoteCreate, NoteResponse
 
@@ -1591,6 +1591,110 @@ async def get_user_profile_with_stats(user=Depends(get_current_user)):
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/documents/generate")
+async def generate_document(
+    request: DocumentGenerationRequest,
+    user=Depends(get_current_user)
+):
+    """Generate document using AI (server-side to protect API key)"""
+    try:
+        # Use your AI service (Gemini) with server-side API key
+        prompt = f'Generate a comprehensive business document for a "{request.document_name}". The response should contain only the text of the document itself, starting with a title. Format the content using markdown for headers, bold text, and lists.'
+        
+        payload = {
+            "contents": [{
+                "role": "user", 
+                "parts": [{"text": prompt}]
+            }]
+        }
+        
+        # Use environment variable for API key (secure)
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise HTTPException(status_code=500, detail="AI service not configured")
+        
+        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+        
+        import httpx
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                api_url, 
+                headers={'Content-Type': 'application/json'}, 
+                json=payload,
+                timeout=30.0
+            )
+        
+        if not response.is_success:
+            raise HTTPException(status_code=500, detail="AI generation failed")
+        
+        result = response.json()
+        content = result.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "Could not generate content.")
+        
+        return {
+            "success": True,
+            "content": content,
+            "document_name": request.document_name,
+            "generated_at": datetime.utcnow().isoformat()
+        }
+        
+    except Exception as e:
+        print(f"Document generation error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate document: {str(e)}")
+
+@app.post("/api/google/create-formatted-doc")
+async def create_formatted_google_doc_from_markdown(
+    request: FormattedGoogleDocRequest,
+    user=Depends(get_current_user)
+):
+    """Create Google Doc with markdown-to-rich-text conversion"""
+    try:
+        # Validate Google connection
+        user_profile = await firebase_service.get_user_profile(user["uid"])
+        if not user_profile.get("google_connected"):
+            raise HTTPException(
+                status_code=400, 
+                detail="Google account not connected. Please connect your Google account first."
+            )
+        
+        # Convert markdown to Google Docs formatting requests
+        if request.preserve_markdown:
+            markdown_converter = MarkdownToGoogleDocsConverter()
+            formatting_requests = markdown_converter.convert_markdown_to_google_docs_requests(
+                request.content
+            )
+        else:
+            # Fallback to basic formatting
+            enhanced_google_service = EnhancedGoogleService(firebase_service)
+            formatting_requests = enhanced_google_service._parse_content_for_formatting(
+                request.content
+            )
+        
+        # Create document with formatting
+        result = await create_google_doc_with_custom_formatting(
+            user_id=user["uid"],
+            title=request.title,
+            formatting_requests=formatting_requests
+        )
+        
+        return {
+            "success": True,
+            "document_id": result["document_id"],
+            "document_url": result["document_url"],
+            "title": request.title,
+            "formatted": True,
+            "markdown_converted": request.preserve_markdown,
+            "message": "Document created successfully with markdown formatting preserved"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error creating formatted Google Doc: {e}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Failed to create Google Doc: {str(e)}"
+        )
 
 if __name__ == "__main__":
     uvicorn.run(

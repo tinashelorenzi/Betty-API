@@ -481,3 +481,277 @@ class DocumentService:
             
         except Exception as e:
             raise Exception(f"Failed to delete multiple documents: {e}")
+
+class MarkdownToGoogleDocsConverter:
+    """Converts markdown content to Google Docs API formatting requests"""
+    
+    def convert_markdown_to_google_docs_requests(self, markdown_content: str) -> List[Dict]:
+        """Convert markdown to Google Docs formatting requests"""
+        requests = []
+        current_index = 1
+        
+        # Split content by lines to process markdown syntax
+        lines = markdown_content.split('\n')
+        
+        for line in lines:
+            if not line and not line.strip():
+                # Empty line
+                requests.append({
+                    'insertText': {
+                        'location': {'index': current_index},
+                        'text': '\n'
+                    }
+                })
+                current_index += 1
+                continue
+            
+            # Process the line and add formatting
+            line_requests = self._process_markdown_line(line, current_index)
+            requests.extend(line_requests)
+            
+            # Add line break
+            line_length = len(line) + 1  # +1 for \n
+            current_index += line_length
+        
+        return requests
+    
+    def _process_markdown_line(self, line: str, start_index: int) -> List[Dict]:
+        """Process a single line of markdown and return formatting requests"""
+        requests = []
+        
+        # Insert the text first (we'll clean up markdown syntax)
+        clean_text = self._clean_markdown_syntax(line) + '\n'
+        
+        requests.append({
+            'insertText': {
+                'location': {'index': start_index},
+                'text': clean_text
+            }
+        })
+        
+        # Apply formatting based on markdown syntax
+        if line.startswith('# '):
+            # H1 - Main title
+            requests.extend(self._format_heading(start_index, len(clean_text) - 1, level=1))
+        elif line.startswith('## '):
+            # H2 - Section heading
+            requests.extend(self._format_heading(start_index, len(clean_text) - 1, level=2))
+        elif line.startswith('### '):
+            # H3 - Sub-section heading
+            requests.extend(self._format_heading(start_index, len(clean_text) - 1, level=3))
+        elif line.startswith('- ') or line.startswith('* '):
+            # Bullet list
+            requests.extend(self._format_bullet_list(start_index, len(clean_text) - 1))
+        elif re.match(r'^\d+\. ', line):
+            # Numbered list
+            requests.extend(self._format_numbered_list(start_index, len(clean_text) - 1))
+        
+        # Apply inline formatting (bold, italic)
+        inline_requests = self._apply_inline_markdown_formatting(line, start_index)
+        requests.extend(inline_requests)
+        
+        return requests
+    
+    def _clean_markdown_syntax(self, text: str) -> str:
+        """Remove markdown syntax characters but preserve the text"""
+        # Remove heading markers
+        text = re.sub(r'^#{1,6}\s+', '', text)
+        
+        # Remove list markers
+        text = re.sub(r'^[\-\*]\s+', '• ', text)
+        text = re.sub(r'^\d+\.\s+', '', text)
+        
+        # Remove bold and italic markers (but keep the text)
+        text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
+        text = re.sub(r'\*(.*?)\*', r'\1', text)
+        text = re.sub(r'_(.*?)_', r'\1', text)
+        
+        return text
+    
+    def _format_heading(self, start_index: int, length: int, level: int) -> List[Dict]:
+        """Format text as heading"""
+        font_sizes = {1: 18, 2: 16, 3: 14}
+        font_size = font_sizes.get(level, 12)
+        
+        requests = [
+            {
+                'updateTextStyle': {
+                    'range': {
+                        'startIndex': start_index,
+                        'endIndex': start_index + length
+                    },
+                    'textStyle': {
+                        'bold': True,
+                        'fontSize': {'magnitude': font_size, 'unit': 'PT'},
+                        'foregroundColor': {
+                            'color': {'rgbColor': {'red': 0.2, 'green': 0.2, 'blue': 0.2}}
+                        }
+                    },
+                    'fields': 'bold,fontSize,foregroundColor'
+                }
+            }
+        ]
+        
+        # Center align for H1 (main title)
+        if level == 1:
+            requests.append({
+                'updateParagraphStyle': {
+                    'range': {
+                        'startIndex': start_index,
+                        'endIndex': start_index + length
+                    },
+                    'paragraphStyle': {
+                        'alignment': 'CENTER',
+                        'spaceAbove': {'magnitude': 12, 'unit': 'PT'},
+                        'spaceBelow': {'magnitude': 12, 'unit': 'PT'}
+                    },
+                    'fields': 'alignment,spaceAbove,spaceBelow'
+                }
+            })
+        else:
+            requests.append({
+                'updateParagraphStyle': {
+                    'range': {
+                        'startIndex': start_index,
+                        'endIndex': start_index + length
+                    },
+                    'paragraphStyle': {
+                        'spaceAbove': {'magnitude': 8, 'unit': 'PT'},
+                        'spaceBelow': {'magnitude': 4, 'unit': 'PT'}
+                    },
+                    'fields': 'spaceAbove,spaceBelow'
+                }
+            })
+        
+        return requests
+    
+    def _format_bullet_list(self, start_index: int, length: int) -> List[Dict]:
+        """Format as bullet list"""
+        return [
+            {
+                'updateParagraphStyle': {
+                    'range': {
+                        'startIndex': start_index,
+                        'endIndex': start_index + length
+                    },
+                    'paragraphStyle': {
+                        'indentStart': {'magnitude': 18, 'unit': 'PT'},
+                        'spaceAbove': {'magnitude': 2, 'unit': 'PT'},
+                        'spaceBelow': {'magnitude': 2, 'unit': 'PT'}
+                    },
+                    'fields': 'indentStart,spaceAbove,spaceBelow'
+                }
+            }
+        ]
+    
+    def _format_numbered_list(self, start_index: int, length: int) -> List[Dict]:
+        """Format as numbered list"""
+        return [
+            {
+                'updateParagraphStyle': {
+                    'range': {
+                        'startIndex': start_index,
+                        'endIndex': start_index + length
+                    },
+                    'paragraphStyle': {
+                        'indentStart': {'magnitude': 18, 'unit': 'PT'},
+                        'spaceAbove': {'magnitude': 2, 'unit': 'PT'},
+                        'spaceBelow': {'magnitude': 2, 'unit': 'PT'}
+                    },
+                    'fields': 'indentStart,spaceAbove,spaceBelow'
+                }
+            }
+        ]
+    
+    def _apply_inline_markdown_formatting(self, line: str, start_index: int) -> List[Dict]:
+        """Apply bold and italic formatting from markdown"""
+        requests = []
+        
+        # Find bold text **text**
+        bold_pattern = r'\*\*(.*?)\*\*'
+        for match in re.finditer(bold_pattern, line):
+            # Calculate position in cleaned text
+            clean_line = self._clean_markdown_syntax(line)
+            text_before_match = self._clean_markdown_syntax(line[:match.start()])
+            match_text = match.group(1)
+            
+            match_start = start_index + len(text_before_match)
+            match_end = match_start + len(match_text)
+            
+            requests.append({
+                'updateTextStyle': {
+                    'range': {
+                        'startIndex': match_start,
+                        'endIndex': match_end
+                    },
+                    'textStyle': {'bold': True},
+                    'fields': 'bold'
+                }
+            })
+        
+        # Find italic text *text* (but not **text**)
+        italic_pattern = r'(?<!\*)\*([^*]+)\*(?!\*)'
+        for match in re.finditer(italic_pattern, line):
+            text_before_match = self._clean_markdown_syntax(line[:match.start()])
+            match_text = match.group(1)
+            
+            match_start = start_index + len(text_before_match)
+            match_end = match_start + len(match_text)
+            
+            requests.append({
+                'updateTextStyle': {
+                    'range': {
+                        'startIndex': match_start,
+                        'endIndex': match_end
+                    },
+                    'textStyle': {'italic': True},
+                    'fields': 'italic'
+                }
+            })
+        
+        return requests
+
+async def create_google_doc_with_custom_formatting(
+    user_id: str, 
+    title: str, 
+    formatting_requests: List[Dict]
+) -> Dict[str, Any]:
+    """Create Google Doc with custom formatting requests"""
+    try:
+        # Get user credentials
+        enhanced_service = EnhancedGoogleService(firebase_service)
+        credentials = await enhanced_service.get_user_credentials(user_id)
+        
+        if not credentials:
+            raise Exception("Google account not connected")
+        
+        # Create the document
+        docs_service = build('docs', 'v1', credentials=credentials)
+        doc = {'title': title}
+        
+        document = docs_service.documents().create(body=doc).execute()
+        document_id = document.get('documentId')
+        
+        # Apply formatting requests in batches (Google Docs has limits)
+        batch_size = 25  # Safe batch size for Google Docs API
+        for i in range(0, len(formatting_requests), batch_size):
+            batch = formatting_requests[i:i + batch_size]
+            
+            docs_service.documents().batchUpdate(
+                documentId=document_id,
+                body={'requests': batch}
+            ).execute()
+        
+        # Generate shareable URL
+        document_url = f"https://docs.google.com/document/d/{document_id}/edit"
+        
+        return {
+            "document_id": document_id,
+            "document_url": document_url,
+            "title": title,
+            "formatted": True
+        }
+        
+    except Exception as e:
+        print(f"Failed to create formatted Google Doc: {e}")
+        raise Exception(f"Failed to create Google Doc: {e}")
