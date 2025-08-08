@@ -1,211 +1,262 @@
-from pydantic import BaseModel, Field
-from typing import Optional, Dict, Any, List
+# models/planner_models.py - Enhanced version
+from pydantic import BaseModel, validator
+from typing import Optional, List, Dict, Any
 from datetime import datetime, date
 from enum import Enum
 
-# ============================================================================
-# TASK MODELS
-# ============================================================================
-
-class TaskPriority(str, Enum):
-    """Enum for task priorities"""
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-    URGENT = "urgent"
-
+# Enums
 class TaskStatus(str, Enum):
-    """Enum for task status"""
     TODO = "todo"
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
 
-class TaskBase(BaseModel):
-    """Base task model"""
-    title: str = Field(..., min_length=1, max_length=200)
-    description: Optional[str] = Field(None, max_length=1000)
-    priority: TaskPriority = TaskPriority.MEDIUM
-    status: TaskStatus = TaskStatus.TODO
-    due_date: Optional[datetime] = None
-    tags: List[str] = Field(default_factory=list)
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+class TaskPriority(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    URGENT = "urgent"
 
-class TaskCreate(TaskBase):
-    """Model for creating a new task"""
-    pass
+class NoteType(str, Enum):
+    TEXT = "text"
+    CHECKLIST = "checklist"
+    VOICE_MEMO = "voice_memo"
+    MEETING_NOTES = "meeting_notes"
+
+class EventType(str, Enum):
+    TASK_DEADLINE = "task_deadline"
+    MEETING = "meeting"
+    REMINDER = "reminder"
+    APPOINTMENT = "appointment"
+
+class RecordingStatus(str, Enum):
+    RECORDING = "recording"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+# Task Models
+class TaskCreate(BaseModel):
+    title: str
+    description: Optional[str] = None
+    priority: Optional[TaskPriority] = TaskPriority.MEDIUM
+    due_date: Optional[datetime] = None
+    tags: Optional[List[str]] = []
+    metadata: Optional[Dict[str, Any]] = {}
+    sync_to_calendar: Optional[bool] = False
+
+    @validator('title')
+    def title_must_not_be_empty(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Title cannot be empty')
+        return v.strip()
 
 class TaskUpdate(BaseModel):
-    """Model for updating a task"""
-    title: Optional[str] = Field(None, min_length=1, max_length=200)
-    description: Optional[str] = Field(None, max_length=1000)
+    title: Optional[str] = None
+    description: Optional[str] = None
     priority: Optional[TaskPriority] = None
     status: Optional[TaskStatus] = None
     due_date: Optional[datetime] = None
     tags: Optional[List[str]] = None
     metadata: Optional[Dict[str, Any]] = None
 
-class TaskResponse(TaskBase):
-    """Model for task response"""
-    id: str
-    user_id: str
-    created_at: datetime
-    updated_at: datetime
-    completed_at: Optional[datetime] = None
-    
-    class Config:
-        from_attributes = True
-
-# ============================================================================
-# NOTE MODELS
-# ============================================================================
-
-class NoteType(str, Enum):
-    """Enum for note types"""
-    GENERAL = "general"
-    MEETING = "meeting"
-    IDEA = "idea"
-    PROJECT = "project"
-    PERSONAL = "personal"
-
-class NoteBase(BaseModel):
-    """Base note model"""
-    title: str = Field(..., min_length=1, max_length=200)
-    content: str = Field(..., min_length=1)
-    note_type: NoteType = NoteType.GENERAL
-    tags: List[str] = Field(default_factory=list)
-    is_pinned: bool = False
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-
-class NoteCreate(NoteBase):
-    """Model for creating a new note"""
-    pass
-
-class NoteUpdate(BaseModel):
-    """Model for updating a note"""
-    title: Optional[str] = Field(None, min_length=1, max_length=200)
-    content: Optional[str] = Field(None, min_length=1)
-    note_type: Optional[NoteType] = None
-    tags: Optional[List[str]] = None
-    is_pinned: Optional[bool] = None
-    metadata: Optional[Dict[str, Any]] = None
-
-class NoteResponse(NoteBase):
-    """Model for note response"""
-    id: str
-    user_id: str
-    created_at: datetime
-    updated_at: datetime
-    google_keep_id: Optional[str] = None
-    word_count: int = 0
-    
-    class Config:
-        from_attributes = True
-
-# ============================================================================
-# CALENDAR MODELS
-# ============================================================================
-
-class EventType(str, Enum):
-    """Enum for calendar event types"""
-    MEETING = "meeting"
-    APPOINTMENT = "appointment"
-    REMINDER = "reminder"
-    DEADLINE = "deadline"
-    PERSONAL = "personal"
-    BUSINESS = "business"
-
-class CalendarEvent(BaseModel):
-    """Model for calendar events"""
-    id: Optional[str] = None
-    title: str = Field(..., min_length=1, max_length=200)
-    description: Optional[str] = None
-    start_time: datetime
-    end_time: datetime
-    location: Optional[str] = None
-    event_type: EventType = EventType.MEETING
-    attendees: List[str] = Field(default_factory=list)  # Email addresses
-    is_all_day: bool = False
-    reminder_minutes: Optional[int] = 15
-    google_event_id: Optional[str] = None
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-
-class CalendarEventCreate(BaseModel):
-    """Model for creating calendar events"""
-    title: str = Field(..., min_length=1, max_length=200)
-    description: Optional[str] = None
-    start_time: datetime
-    end_time: datetime
-    location: Optional[str] = None
-    event_type: EventType = EventType.MEETING
-    attendees: List[str] = Field(default_factory=list)
-    is_all_day: bool = False
-    reminder_minutes: Optional[int] = 15
-
-# ============================================================================
-# MEETING RECORDER MODELS
-# ============================================================================
-
-class RecordingStatus(str, Enum):
-    """Enum for recording status"""
-    IDLE = "idle"
-    RECORDING = "recording"
-    PROCESSING = "processing"
-    COMPLETED = "completed"
-    FAILED = "failed"
-
-class MeetingRecording(BaseModel):
-    """Model for meeting recordings"""
+class TaskResponse(BaseModel):
     id: str
     user_id: str
     title: str
-    duration_seconds: int
+    description: Optional[str] = None
+    priority: TaskPriority
+    status: TaskStatus
+    due_date: Optional[datetime] = None
+    tags: List[str] = []
+    metadata: Dict[str, Any] = {}
+    completed_at: Optional[datetime] = None
+    calendar_event_id: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+# Note Models
+class NoteCreate(BaseModel):
+    title: str
+    content: str
+    note_type: Optional[NoteType] = NoteType.TEXT
+    tags: Optional[List[str]] = []
+    metadata: Optional[Dict[str, Any]] = {}
+
+    @validator('title')
+    def title_must_not_be_empty(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Title cannot be empty')
+        return v.strip()
+
+class NoteUpdate(BaseModel):
+    title: Optional[str] = None
+    content: Optional[str] = None
+    note_type: Optional[NoteType] = None
+    tags: Optional[List[str]] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+class NoteResponse(BaseModel):
+    id: str
+    user_id: str
+    title: str
+    content: str
+    note_type: NoteType
+    tags: List[str] = []
+    metadata: Dict[str, Any] = {}
+    google_keep_id: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+# Calendar Models
+class CalendarEventCreate(BaseModel):
+    summary: str
+    description: Optional[str] = None
+    start_datetime: datetime
+    end_datetime: datetime
+    timezone: Optional[str] = "UTC"
+    attendees: Optional[List[str]] = []
+    location: Optional[str] = None
+    reminders: Optional[List[Dict[str, Any]]] = []
+
+class CalendarEvent(BaseModel):
+    id: str
+    summary: str
+    description: Optional[str] = None
+    start_datetime: datetime
+    end_datetime: datetime
+    timezone: str
+    attendees: List[str] = []
+    location: Optional[str] = None
+    event_type: EventType
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+# Recording Models
+class RecordingCreate(BaseModel):
+    title: str
+    meeting_id: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = {}
+
+class RecordingUpdate(BaseModel):
+    title: Optional[str] = None
+    status: Optional[RecordingStatus] = None
+    transcript: Optional[str] = None
+    summary: Optional[str] = None
+    action_items: Optional[List[str]] = []
+    metadata: Optional[Dict[str, Any]] = None
+
+class MeetingRecording(BaseModel):
+    id: str
+    user_id: str
+    title: str
     status: RecordingStatus
     file_url: Optional[str] = None
     transcript: Optional[str] = None
     summary: Optional[str] = None
-    action_items: List[str] = Field(default_factory=list)
-    participants: List[str] = Field(default_factory=list)
+    action_items: List[str] = []
+    duration_seconds: Optional[int] = None
+    meeting_id: Optional[str] = None
+    metadata: Dict[str, Any] = {}
     created_at: datetime
-    completed_at: Optional[datetime] = None
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-    
+    updated_at: datetime
+
     class Config:
         from_attributes = True
 
-class RecordingCreate(BaseModel):
-    """Model for creating a new recording"""
-    title: str = Field(..., min_length=1, max_length=200)
-    participants: List[str] = Field(default_factory=list)
-
-class RecordingUpdate(BaseModel):
-    """Model for updating recording"""
-    title: Optional[str] = Field(None, min_length=1, max_length=200)
-    status: Optional[RecordingStatus] = None
-    transcript: Optional[str] = None
-    summary: Optional[str] = None
-    action_items: Optional[List[str]] = None
-
-# ============================================================================
-# PLANNER DASHBOARD MODELS
-# ============================================================================
-
-class PlannerDashboard(BaseModel):
-    """Model for planner dashboard data"""
-    user_id: str
-    today_tasks: int
-    overdue_tasks: int
-    completed_tasks_today: int
-    upcoming_events: List[CalendarEvent]
-    recent_notes: List[NoteResponse]
-    active_recordings: int
-    
+# Dashboard and Stats Models
 class PlannerStats(BaseModel):
-    """Model for planner statistics"""
     total_tasks: int
     completed_tasks: int
+    pending_tasks: int
+    overdue_tasks: int
     completion_rate: float
     total_notes: int
-    total_recordings: int
-    most_used_tags: List[str]
-    productivity_score: float
+    tasks_this_week: Optional[int] = 0
+    tasks_completed_this_week: Optional[int] = 0
+
+class PlannerDashboard(BaseModel):
+    stats: PlannerStats
+    upcoming_tasks: List[TaskResponse]
+    recent_notes: List[NoteResponse]
+    calendar_events: List[CalendarEvent]
+    overdue_tasks: List[TaskResponse]
+
+# Search and Filter Models
+class TaskFilter(BaseModel):
+    status: Optional[List[TaskStatus]] = None
+    priority: Optional[List[TaskPriority]] = None
+    tags: Optional[List[str]] = None
+    due_date_from: Optional[date] = None
+    due_date_to: Optional[date] = None
+    created_after: Optional[datetime] = None
+    search_term: Optional[str] = None
+
+class NoteFilter(BaseModel):
+    note_type: Optional[List[NoteType]] = None
+    tags: Optional[List[str]] = None
+    created_after: Optional[datetime] = None
+    search_term: Optional[str] = None
+
+# Bulk Operations Models
+class BulkTaskUpdate(BaseModel):
+    task_ids: List[str]
+    update: TaskUpdate
+
+class BulkTaskResponse(BaseModel):
+    updated_count: int
+    failed_count: int
+    updated_tasks: List[TaskResponse]
+    errors: List[str] = []
+
+# Integration Models
+class GoogleKeepExport(BaseModel):
+    note_id: str
+    export_as_checklist: Optional[bool] = False
+
+class CalendarSyncRequest(BaseModel):
+    sync_existing_tasks: Optional[bool] = True
+    days_ahead: Optional[int] = 30
+    create_reminders: Optional[bool] = True
+
+class CalendarSyncResponse(BaseModel):
+    synced_tasks: int
+    created_events: int
+    updated_events: int
+    errors: List[str] = []
+
+# Quick Action Models
+class QuickTaskCreate(BaseModel):
+    title: str
+    due_today: Optional[bool] = False
+    priority: Optional[TaskPriority] = TaskPriority.MEDIUM
+
+class QuickNoteCreate(BaseModel):
+    content: str
+    title: Optional[str] = None  # Auto-generated from content if not provided
+
+# Notification Models
+class TaskReminder(BaseModel):
+    task_id: str
+    reminder_type: str  # "due_soon", "overdue", "completed"
+    message: str
+    scheduled_at: datetime
+
+class PlannerNotification(BaseModel):
+    id: str
+    user_id: str
+    title: str
+    message: str
+    type: str  # "task_reminder", "calendar_event", "sync_status"
+    data: Dict[str, Any] = {}
+    read: bool = False
+    created_at: datetime
