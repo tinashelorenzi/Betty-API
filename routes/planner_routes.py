@@ -63,32 +63,64 @@ async def create_quick_task(
 
 @router.get("/tasks", response_model=List[TaskResponse])
 async def get_tasks(
-    status: Optional[TaskStatus] = None,
-    priority: Optional[TaskPriority] = None,
-    due_date_from: Optional[date] = None,
-    due_date_to: Optional[date] = None,
-    completed: Optional[bool] = None,
-    limit: Optional[int] = Query(default=50, le=100),
+    # Individual filter parameters
+    status: Optional[str] = Query(None, description="Comma-separated status values"),
+    priority: Optional[str] = Query(None, description="Comma-separated priority values"),
+    due_date_from: Optional[date] = Query(None, description="Filter tasks due from this date"),
+    due_date_to: Optional[date] = Query(None, description="Filter tasks due until this date"),
+    completed: Optional[bool] = Query(None, description="Filter by completion status"),
+    limit: Optional[int] = Query(default=50, le=100, description="Maximum number of tasks to return"),
+    search: Optional[str] = Query(None, description="Search in task titles and descriptions"),
     user=Depends(get_current_user),
     service: EnhancedPlannerService = Depends(get_services)
 ):
     """Get user tasks with filtering options"""
     try:
-        task_filter = TaskFilter(
-            status=[status] if status else None,
-            priority=[priority] if priority else None,
-            due_date_from=due_date_from,
-            due_date_to=due_date_to
-        )
+        # Build TaskFilter from query parameters
+        task_filter = TaskFilter()
         
+        # Parse status parameter
+        if status:
+            try:
+                status_list = [TaskStatus(s.strip()) for s in status.split(',') if s.strip()]
+                task_filter.status = status_list
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=f"Invalid status value: {e}")
+        
+        # Parse priority parameter
+        if priority:
+            try:
+                priority_list = [TaskPriority(p.strip()) for p in priority.split(',') if p.strip()]
+                task_filter.priority = priority_list
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=f"Invalid priority value: {e}")
+        
+        # Set date filters
+        if due_date_from:
+            task_filter.due_date_from = due_date_from
+        if due_date_to:
+            task_filter.due_date_to = due_date_to
+        
+        # Set search filter
+        if search:
+            task_filter.search = search
+        
+        print(f"Getting tasks with filter: {task_filter}")  # Debug log
+        
+        # Call service method with proper parameters
         return await service.get_tasks(
             user["uid"], 
             task_filter=task_filter,
             completed=completed,
             limit=limit
         )
+        
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Error in get_tasks route: {e}")  # Debug log
+        raise HTTPException(status_code=500, detail=f"Failed to get tasks: {str(e)}")
+
 
 @router.get("/tasks/today", response_model=List[TaskResponse])
 async def get_today_tasks(
@@ -98,14 +130,17 @@ async def get_today_tasks(
     """Get today's tasks"""
     try:
         today = date.today()
+        task_filter = TaskFilter(
+            due_date_from=today,
+            due_date_to=today
+        )
+        
         return await service.get_tasks(
             user["uid"],
-            task_filter=TaskFilter(
-                due_date_from=today,
-                due_date_to=today
-            )
+            task_filter=task_filter
         )
     except Exception as e:
+        print(f"Error getting today's tasks: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/tasks/upcoming", response_model=List[TaskResponse])
@@ -119,15 +154,18 @@ async def get_upcoming_tasks(
         today = date.today()
         end_date = today + timedelta(days=days)
         
+        task_filter = TaskFilter(
+            due_date_from=today,
+            due_date_to=end_date,
+            status=[TaskStatus.TODO, TaskStatus.IN_PROGRESS]
+        )
+        
         return await service.get_tasks(
             user["uid"],
-            task_filter=TaskFilter(
-                due_date_from=today,
-                due_date_to=end_date,
-                status=[TaskStatus.TODO, TaskStatus.IN_PROGRESS]
-            )
+            task_filter=task_filter
         )
     except Exception as e:
+        print(f"Error getting upcoming tasks: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.put("/tasks/{task_id}", response_model=TaskResponse)
@@ -187,27 +225,66 @@ async def delete_task(
 # CALENDAR INTEGRATION ROUTES
 # ========================================================================
 
-@router.get("/calendar/events")
+@router.get("/calendar/events", response_model=List[CalendarEvent])
 async def get_calendar_events(
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
+    start_date: date = Query(..., description="Start date for events (YYYY-MM-DD)"),
+    end_date: date = Query(..., description="End date for events (YYYY-MM-DD)"),
     user=Depends(get_current_user),
     service: EnhancedPlannerService = Depends(get_services)
 ):
-    """Get calendar events with optional date range"""
+    """Get calendar events for date range"""
     try:
-        # Default to next 30 days if no range provided
-        if not start_date:
-            start_date = date.today().isoformat()
-        if not end_date:
-            end_date = (date.today() + timedelta(days=30)).isoformat()
+        print(f"Getting calendar events from {start_date} to {end_date}")  # Debug log
         
-        events = await service.google_service.get_calendar_events(
-            user["uid"], start_date, end_date
-        )
-        return {"events": events}
+        # Validate date range
+        if start_date > end_date:
+            raise HTTPException(status_code=400, detail="Start date must be before end date")
+        
+        # Convert dates to strings for the service
+        start_date_str = start_date.isoformat()
+        end_date_str = end_date.isoformat()
+        
+        # Call the Google service method
+        if hasattr(service, 'google_service') and hasattr(service.google_service, 'get_calendar_events'):
+            events = await service.google_service.get_calendar_events(
+                user["uid"], 
+                start_date_str, 
+                end_date_str
+            )
+            
+            # Convert to CalendarEvent objects if needed
+            calendar_events = []
+            for event in events:
+                try:
+                    calendar_event = CalendarEvent(
+                        id=event.get('id', ''),
+                        title=event.get('title', 'No Title'),
+                        description=event.get('description', ''),
+                        start_time=event.get('start_time'),
+                        end_time=event.get('end_time'),
+                        location=event.get('location', ''),
+                        event_type=event.get('event_type', 'google_calendar'),
+                        user_id=user["uid"],
+                        created_at=datetime.utcnow(),
+                        updated_at=datetime.utcnow()
+                    )
+                    calendar_events.append(calendar_event)
+                except Exception as e:
+                    print(f"Error converting event: {e}")
+                    continue
+            
+            return calendar_events
+        else:
+            print("Google service not available")
+            return []
+            
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Error getting calendar events: {e}")  # Debug log
+        # Return empty list instead of 500 error
+        return []
+
 
 @router.post("/calendar/events")
 async def create_calendar_event(
@@ -329,9 +406,28 @@ async def get_planner_dashboard(
 ):
     """Get comprehensive planner dashboard"""
     try:
-        return await service.get_planner_dashboard(user["uid"])
+        print(f"Getting dashboard for user: {user['uid']}")  # Debug log
+        dashboard = await service.get_planner_dashboard(user["uid"])
+        print(f"Dashboard retrieved successfully")  # Debug log
+        return dashboard
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Error in dashboard route: {e}")  # Debug log
+        # Return a basic dashboard instead of 500 error
+        from models.planner_models import PlannerStats
+        
+        return PlannerDashboard(
+            stats=PlannerStats(
+                total_tasks=0,
+                completed_tasks=0,
+                pending_tasks=0,
+                overdue_tasks=0,
+                completion_rate=0,
+                total_notes=0
+            ),
+            upcoming_tasks=[],
+            recent_notes=[],
+            calendar_events=[]
+        )
 
 @router.get("/stats")
 async def get_planner_stats(

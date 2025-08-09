@@ -454,54 +454,156 @@ class GoogleService:
     # GOOGLE CALENDAR API
     # ========================================================================
     
-    async def get_calendar_events(
-        self, 
-        user_id: str, 
-        start_date: str, 
-        end_date: str
-    ) -> List[Dict[str, Any]]:
-        """Get user's calendar events"""
+    async def get_calendar_events(self, user_id: str, start_date: str, end_date: str) -> List[Dict]:
+        """Get calendar events with proper error handling"""
         try:
-            credentials = await self.get_user_credentials(user_id)
+            # Check if user has valid Google credentials
+            if not await self._check_google_credentials(user_id):
+                print(f"No valid Google credentials for user {user_id}")
+                return []
+            
+            # Get user's Google credentials
+            credentials = await self._get_user_credentials(user_id)
             if not credentials:
-                raise ValueError("Google account not connected")
+                print(f"Failed to get credentials for user {user_id}")
+                return []
             
-            calendar_service = build('calendar', 'v3', credentials=credentials)
+            # Build calendar service
+            service = build('calendar', 'v3', credentials=credentials)
             
-            # Get events from primary calendar
-            events_result = calendar_service.events().list(
+            # Format dates properly for Google Calendar API
+            try:
+                # Ensure dates are in proper ISO format with timezone
+                start_datetime = datetime.fromisoformat(start_date)
+                end_datetime = datetime.fromisoformat(end_date)
+                
+                # Add timezone if not present
+                if start_datetime.tzinfo is None:
+                    start_datetime = start_datetime.replace(tzinfo=timezone.utc)
+                if end_datetime.tzinfo is None:
+                    end_datetime = end_datetime.replace(tzinfo=timezone.utc)
+                
+                time_min = start_datetime.isoformat()
+                time_max = end_datetime.isoformat()
+                
+            except ValueError as e:
+                print(f"Date parsing error: {e}")
+                # Fallback to string format
+                time_min = f"{start_date}T00:00:00Z"
+                time_max = f"{end_date}T23:59:59Z"
+            
+            # Call Google Calendar API with proper parameters
+            events_result = service.events().list(
                 calendarId='primary',
-                timeMin=start_date,
-                timeMax=end_date,
+                timeMin=time_min,
+                timeMax=time_max,
+                maxResults=50,
                 singleEvents=True,
                 orderBy='startTime'
             ).execute()
             
             events = events_result.get('items', [])
             
-            # Format events
+            # Format events for our API
             formatted_events = []
             for event in events:
-                start = event['start'].get('dateTime', event['start'].get('date'))
-                end = event['end'].get('dateTime', event['end'].get('date'))
-                
-                formatted_events.append({
-                    'id': event['id'],
-                    'title': event.get('summary', 'No Title'),
-                    'description': event.get('description', ''),
-                    'start_time': start,
-                    'end_time': end,
-                    'location': event.get('location', ''),
-                    'attendees': [attendee.get('email') for attendee in event.get('attendees', [])],
-                    'html_link': event.get('htmlLink', '')
-                })
+                try:
+                    formatted_event = {
+                        'id': event.get('id'),
+                        'title': event.get('summary', 'No Title'),
+                        'description': event.get('description', ''),
+                        'start_time': event.get('start', {}).get('dateTime') or event.get('start', {}).get('date'),
+                        'end_time': event.get('end', {}).get('dateTime') or event.get('end', {}).get('date'),
+                        'location': event.get('location', ''),
+                        'attendees': [
+                            attendee.get('email') for attendee in event.get('attendees', [])
+                        ],
+                        'event_type': 'google_calendar',
+                        'user_id': user_id,
+                        'google_event_id': event.get('id')
+                    }
+                    formatted_events.append(formatted_event)
+                except Exception as e:
+                    print(f"Error formatting event {event.get('id', 'unknown')}: {e}")
+                    continue
             
             return formatted_events
             
-        except HttpError as e:
-            raise Exception(f"Google Calendar API error: {e}")
+        except HttpError as error:
+            print(f"Google Calendar API error: {error}")
+            if error.resp.status == 401:
+                print("Authentication error - user needs to re-authenticate with Google")
+            elif error.resp.status == 403:
+                print("Permission error - user hasn't granted calendar access")
+            elif error.resp.status == 400:
+                print("Bad request - check date format and parameters")
+            return []
         except Exception as e:
-            raise Exception(f"Failed to get calendar events: {e}")
+            print(f"Unexpected error getting calendar events: {e}")
+            return []
+    
+    async def _check_google_credentials(self, user_id: str) -> bool:
+        """Check if user has valid Google credentials"""
+        try:
+            user_doc = await self.firebase_service.get_document("users", user_id)
+            if not user_doc:
+                return False
+            
+            google_tokens = user_doc.get("google_tokens")
+            if not google_tokens:
+                return False
+            
+            # Check if tokens exist and are not expired
+            access_token = google_tokens.get("access_token")
+            refresh_token = google_tokens.get("refresh_token")
+            
+            if not access_token or not refresh_token:
+                return False
+            
+            # TODO: Check token expiry if you store it
+            return True
+            
+        except Exception as e:
+            print(f"Error checking Google credentials: {e}")
+            return False
+    
+    async def _get_user_credentials(self, user_id: str):
+        """Get user's Google credentials for API calls"""
+        try:
+            user_doc = await self.firebase_service.get_document("users", user_id)
+            if not user_doc:
+                return None
+            
+            google_tokens = user_doc.get("google_tokens")
+            if not google_tokens:
+                return None
+            
+            # Create credentials object
+            credentials = Credentials(
+                token=google_tokens.get("access_token"),
+                refresh_token=google_tokens.get("refresh_token"),
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=os.getenv("GOOGLE_CLIENT_ID"),
+                client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
+                scopes=['https://www.googleapis.com/auth/calendar.readonly']
+            )
+            
+            # Refresh token if needed
+            if credentials.expired:
+                request = Request()
+                credentials.refresh(request)
+                
+                # Update stored tokens
+                await self.firebase_service.update_document("users", user_id, {
+                    "google_tokens.access_token": credentials.token,
+                    "google_tokens.expires_at": credentials.expiry.isoformat() if credentials.expiry else None
+                })
+            
+            return credentials
+            
+        except Exception as e:
+            print(f"Error getting user credentials: {e}")
+            return None
     
     async def create_calendar_event(
         self, 
