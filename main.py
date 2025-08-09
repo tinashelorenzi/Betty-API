@@ -43,6 +43,7 @@ from services.enhanced_planner_service import EnhancedPlannerService
 
 #Import routes
 from routes.planner_routes import router as planner_router
+from routes.auth_routes import router as auth_router
 
 # Initialize services
 firebase_service = FirebaseService()
@@ -83,7 +84,7 @@ app = FastAPI(
 )
 
 app.include_router(planner_router)
-
+app.include_router(auth_router)
 # Mount static files for serving uploaded images
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
@@ -244,6 +245,8 @@ async def login_user(email: str, password: str):
         return result
     except Exception as e:
         raise HTTPException(status_code=401, detail=str(e))
+
+
 
 @app.post("/auth/verify-token")
 async def verify_token(user=Depends(get_current_user)):

@@ -232,9 +232,9 @@ async def get_calendar_events(
     user=Depends(get_current_user),
     service: EnhancedPlannerService = Depends(get_services)
 ):
-    """Get calendar events for date range"""
+    """Get calendar events for date range - IMPROVED VERSION"""
     try:
-        print(f"Getting calendar events from {start_date} to {end_date}")  # Debug log
+        print(f"🔄 Getting calendar events for user {user['uid']} from {start_date} to {end_date}")
         
         # Validate date range
         if start_date > end_date:
@@ -244,15 +244,22 @@ async def get_calendar_events(
         start_date_str = start_date.isoformat()
         end_date_str = end_date.isoformat()
         
-        # Call the Google service method
-        if hasattr(service, 'google_service') and hasattr(service.google_service, 'get_calendar_events'):
+        # Check if user has Google credentials first
+        if hasattr(service, 'google_service'):
+            has_credentials = await service.google_service._check_google_credentials(user["uid"])
+            
+            if not has_credentials:
+                print(f"⚠️ User {user['uid']} has no valid Google credentials, returning empty list")
+                return []
+            
+            # Get calendar events from Google
             events = await service.google_service.get_calendar_events(
                 user["uid"], 
                 start_date_str, 
                 end_date_str
             )
             
-            # Convert to CalendarEvent objects if needed
+            # Convert to CalendarEvent objects
             calendar_events = []
             for event in events:
                 try:
@@ -260,29 +267,32 @@ async def get_calendar_events(
                         id=event.get('id', ''),
                         title=event.get('title', 'No Title'),
                         description=event.get('description', ''),
-                        start_time=event.get('start_time'),
-                        end_time=event.get('end_time'),
+                        start_time=event.get('start_time', ''),
+                        end_time=event.get('end_time', ''),
+                        event_type=EventType.GOOGLE_CALENDAR,
                         location=event.get('location', ''),
-                        event_type=event.get('event_type', 'google_calendar'),
+                        attendees=event.get('attendees', []),
+                        created_at=datetime.utcnow().isoformat(),
+                        updated_at=datetime.utcnow().isoformat(),
                         user_id=user["uid"],
-                        created_at=datetime.utcnow(),
-                        updated_at=datetime.utcnow()
+                        google_event_id=event.get('google_event_id')
                     )
                     calendar_events.append(calendar_event)
                 except Exception as e:
-                    print(f"Error converting event: {e}")
+                    print(f"⚠️ Error converting event {event.get('id', 'unknown')}: {e}")
                     continue
             
+            print(f"✅ Successfully retrieved {len(calendar_events)} calendar events")
             return calendar_events
         else:
-            print("Google service not available")
+            print("❌ Google service not available")
             return []
             
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error getting calendar events: {e}")  # Debug log
-        # Return empty list instead of 500 error
+        print(f"❌ Error in calendar events route: {e}")
+        # Return empty list instead of 500 error to prevent mobile app crashes
         return []
 
 
@@ -459,3 +469,47 @@ async def sync_tasks_with_calendar(
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+@router.post("/calendar/sync-google")
+async def sync_google_calendar(
+    days_ahead: int = Query(default=7, ge=1, le=90),
+    user=Depends(get_current_user),
+    service: EnhancedPlannerService = Depends(get_services)
+):
+    """Manually sync with Google Calendar"""
+    try:
+        print(f"🔄 Manual Google Calendar sync requested for user {user['uid']}")
+        
+        if not hasattr(service, 'google_service'):
+            raise HTTPException(status_code=503, detail="Google service not available")
+        
+        # Check credentials
+        has_credentials = await service.google_service._check_google_credentials(user["uid"])
+        if not has_credentials:
+            raise HTTPException(
+                status_code=401, 
+                detail="Google account not connected. Please connect your Google account first."
+            )
+        
+        # Perform sync
+        start_date = date.today()
+        end_date = start_date + timedelta(days=days_ahead)
+        
+        events = await service.google_service.get_calendar_events(
+            user["uid"], 
+            start_date.isoformat(), 
+            end_date.isoformat()
+        )
+        
+        return {
+            "success": True,
+            "events_synced": len(events),
+            "sync_date": datetime.utcnow().isoformat(),
+            "message": f"Successfully synced {len(events)} events"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error syncing Google Calendar: {e}")
+        raise HTTPException(status_code=500, detail=f"Sync failed: {str(e)}")

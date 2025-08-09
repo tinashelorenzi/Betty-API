@@ -543,61 +543,102 @@ class GoogleService:
             return []
     
     async def _check_google_credentials(self, user_id: str) -> bool:
-        """Check if user has valid Google credentials"""
+        """Check if user has valid Google credentials - IMPROVED VERSION"""
         try:
+            # Check google_tokens collection first
+            tokens_doc = await self.firebase_service.get_document("google_tokens", user_id)
+            
+            if tokens_doc:
+                access_token = tokens_doc.get("access_token")
+                refresh_token = tokens_doc.get("refresh_token")
+                
+                if access_token and refresh_token:
+                    print(f"✅ Found credentials in google_tokens for user {user_id}")
+                    return True
+            
+            # Fallback to users collection
             user_doc = await self.firebase_service.get_document("users", user_id)
-            if not user_doc:
-                return False
+            if user_doc:
+                google_tokens = user_doc.get("google_tokens")
+                if google_tokens:
+                    access_token = google_tokens.get("access_token")
+                    refresh_token = google_tokens.get("refresh_token")
+                    
+                    if access_token and refresh_token:
+                        print(f"✅ Found credentials in users collection for user {user_id}")
+                        return True
             
-            google_tokens = user_doc.get("google_tokens")
-            if not google_tokens:
-                return False
-            
-            # Check if tokens exist and are not expired
-            access_token = google_tokens.get("access_token")
-            refresh_token = google_tokens.get("refresh_token")
-            
-            if not access_token or not refresh_token:
-                return False
-            
-            # TODO: Check token expiry if you store it
-            return True
+            print(f"❌ No valid credentials found for user {user_id}")
+            return False
             
         except Exception as e:
             print(f"Error checking Google credentials: {e}")
             return False
     
     async def _get_user_credentials(self, user_id: str):
-        """Get user's Google credentials for API calls"""
+        """Get user's Google credentials for API calls - FIXED VERSION"""
         try:
-            user_doc = await self.firebase_service.get_document("users", user_id)
-            if not user_doc:
-                return None
+            # First try the new storage location (google_tokens collection)
+            tokens_doc = await self.firebase_service.get_document("google_tokens", user_id)
             
-            google_tokens = user_doc.get("google_tokens")
-            if not google_tokens:
-                return None
+            if tokens_doc:
+                google_tokens = tokens_doc
+            else:
+                # Fallback to old storage location (users collection)
+                user_doc = await self.firebase_service.get_document("users", user_id)
+                if not user_doc:
+                    print(f"No user document found for {user_id}")
+                    return None
+                
+                google_tokens = user_doc.get("google_tokens")
+                if not google_tokens:
+                    print(f"No google_tokens found in user document for {user_id}")
+                    return None
             
-            # Create credentials object
+            # Create credentials object with proper scopes
             credentials = Credentials(
                 token=google_tokens.get("access_token"),
                 refresh_token=google_tokens.get("refresh_token"),
                 token_uri="https://oauth2.googleapis.com/token",
                 client_id=os.getenv("GOOGLE_CLIENT_ID"),
                 client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
-                scopes=['https://www.googleapis.com/auth/calendar.readonly']
+                scopes=[
+                    'https://www.googleapis.com/auth/calendar.readonly',
+                    'https://www.googleapis.com/auth/calendar',
+                    'https://www.googleapis.com/auth/userinfo.email',
+                    'https://www.googleapis.com/auth/userinfo.profile'
+                ]
             )
             
-            # Refresh token if needed
-            if credentials.expired:
-                request = Request()
-                credentials.refresh(request)
-                
-                # Update stored tokens
-                await self.firebase_service.update_document("users", user_id, {
-                    "google_tokens.access_token": credentials.token,
-                    "google_tokens.expires_at": credentials.expiry.isoformat() if credentials.expiry else None
-                })
+            # Check if credentials are expired and refresh if needed
+            if credentials.expired and credentials.refresh_token:
+                try:
+                    request = Request()
+                    credentials.refresh(request)
+                    
+                    # Update stored tokens in both locations for consistency
+                    updated_tokens = {
+                        "access_token": credentials.token,
+                        "expires_at": credentials.expiry.isoformat() if credentials.expiry else None,
+                        "updated_at": datetime.utcnow().isoformat()
+                    }
+                    
+                    # Update in google_tokens collection
+                    if tokens_doc:
+                        await self.firebase_service.update_document("google_tokens", user_id, updated_tokens)
+                    else:
+                        # Update in users collection
+                        await self.firebase_service.update_document("users", user_id, {
+                            "google_tokens.access_token": credentials.token,
+                            "google_tokens.expires_at": credentials.expiry.isoformat() if credentials.expiry else None,
+                            "google_tokens.updated_at": datetime.utcnow().isoformat()
+                        })
+                    
+                    print(f"✅ Refreshed credentials for user {user_id}")
+                    
+                except Exception as e:
+                    print(f"❌ Failed to refresh credentials: {e}")
+                    return None
             
             return credentials
             
