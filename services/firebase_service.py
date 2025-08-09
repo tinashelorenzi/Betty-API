@@ -264,13 +264,13 @@ class FirebaseService:
             return False
     
     async def query_documents(
-        self, 
-        collection: str, 
-        filters: List[tuple] = None, 
-        order_by: str = None,
-        limit: int = None
-    ) -> List[Dict[str, Any]]:
-        """Query documents with optional filters"""
+    self, 
+    collection: str, 
+    filters: List[tuple] = None, 
+    order_by = None,  # Can be string or list
+    limit: int = None
+) -> List[Dict[str, Any]]:
+        """Query documents with optional filters - SUPPORTS BOTH STRING AND LIST ORDER_BY"""
         try:
             if not self._initialized or not self.db:
                 raise RuntimeError("Firebase service not initialized")
@@ -281,12 +281,21 @@ class FirebaseService:
                 for field, operator, value in filters:
                     query = query.where(field, operator, value)
             
-            # Apply ordering
+            # Apply ordering - FIXED to handle both string and list formats
             if order_by:
-                if order_by.startswith('-'):
-                    query = query.order_by(order_by[1:], direction=firestore.Query.DESCENDING)
-                else:
-                    query = query.order_by(order_by)
+                if isinstance(order_by, list):
+                    # Handle list format: [("updated_at", "desc")] or [("created_at", "asc")]
+                    for field, direction in order_by:
+                        if direction.lower() in ["desc", "descending"]:
+                            query = query.order_by(field, direction=firestore.Query.DESCENDING)
+                        else:
+                            query = query.order_by(field, direction=firestore.Query.ASCENDING)
+                elif isinstance(order_by, str):
+                    # Handle string format: "-updated_at" or "created_at"
+                    if order_by.startswith('-'):
+                        query = query.order_by(order_by[1:], direction=firestore.Query.DESCENDING)
+                    else:
+                        query = query.order_by(order_by, direction=firestore.Query.ASCENDING)
             
             # Apply limit
             if limit:
@@ -305,6 +314,8 @@ class FirebaseService:
             
         except Exception as e:
             print(f"❌ Failed to query documents: {e}")
+            import traceback
+            traceback.print_exc()  # Better error debugging
             return []
     
     async def get_user_documents(

@@ -1,18 +1,16 @@
-# auth.py - Authentication utilities for protected routes
+# auth.py - FIXED VERSION
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from datetime import datetime, timezone
-from services.auth_service import AuthService
-from services.firebase_service import FirebaseService
 
-# Initialize services
-firebase_service = FirebaseService()
-auth_service = AuthService(firebase_service)
 security = HTTPBearer()
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """Get current user from JWT token"""
     try:
+        # Import here to avoid circular imports and use initialized services
+        from main import auth_service
+        
         token = credentials.credentials
         print(f"🔍 Validating JWT token for protected endpoint...")
         
@@ -34,7 +32,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
             else:
                 print(f"⚠️ get_user_profile method not available in FirebaseService")
         except Exception as e:
-            print(f"⚠️ Could not get user profile: {e}")
+            print(f"❌ Failed to get user profile: {e}")
         
         # If profile doesn't exist or can't be retrieved, create minimal user object from JWT
         print(f"🆕 Using minimal user data from JWT payload")

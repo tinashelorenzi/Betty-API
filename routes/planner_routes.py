@@ -18,9 +18,7 @@ router = APIRouter(prefix="/planner", tags=["planner"])
 
 # Initialize services (you'll inject these from main.py)
 def get_services():
-    firebase_service = FirebaseService()
-    google_service = GoogleService(firebase_service)
-    enhanced_planner_service = EnhancedPlannerService(firebase_service, google_service)
+    from main import enhanced_planner_service  # ✅ Use the initialized one
     return enhanced_planner_service
 
 # ========================================================================
