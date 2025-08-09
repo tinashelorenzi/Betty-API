@@ -344,3 +344,21 @@ async def get_planner_stats(
         return await service.get_planner_stats(user["uid"], days=days)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/tasks/sync-calendar")
+async def sync_tasks_with_calendar(
+    days_ahead: int = Query(default=7, ge=1, le=90),
+    user=Depends(get_current_user),
+    service: EnhancedPlannerService = Depends(get_services)
+):
+    """Sync tasks with calendar - alternative endpoint for mobile app compatibility"""
+    try:
+        start_date = date.today()
+        end_date = start_date + timedelta(days=days_ahead)
+        
+        result = await service.sync_calendar_tasks(
+            user["uid"], start_date, end_date
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
