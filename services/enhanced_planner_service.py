@@ -341,7 +341,7 @@ class EnhancedPlannerService:
         """Get planner dashboard with stats and upcoming items"""
         try:
             # Get tasks stats - use the updated method signature
-            all_tasks = await self.get_tasks(user_id, limit=1000)  # Get more tasks for accurate stats
+            all_tasks = await self.get_tasks(user_id, limit=1000)
             completed_tasks = [t for t in all_tasks if t.status == TaskStatus.COMPLETED]
             pending_tasks = [t for t in all_tasks if t.status != TaskStatus.COMPLETED]
             
@@ -402,32 +402,20 @@ class EnhancedPlannerService:
                 total_notes=len(recent_notes)
             )
             
-            # Build dashboard response
+            # Build dashboard response - INCLUDE ALL REQUIRED FIELDS
             dashboard = PlannerDashboard(
                 stats=stats,
                 upcoming_tasks=upcoming_tasks[:5],  # Limit to 5 for dashboard
                 recent_notes=recent_notes,
-                calendar_events=calendar_events[:5] if calendar_events else []
+                calendar_events=calendar_events[:5] if calendar_events else [],
+                overdue_tasks=overdue_tasks[:5]  # ✅ ADDED MISSING FIELD
             )
             
             return dashboard
             
         except Exception as e:
             print(f"Error in get_planner_dashboard: {e}")
-            # Return a basic dashboard instead of failing completely
-            return PlannerDashboard(
-                stats=PlannerStats(
-                    total_tasks=0,
-                    completed_tasks=0,
-                    pending_tasks=0,
-                    overdue_tasks=0,
-                    completion_rate=0,
-                    total_notes=0
-                ),
-                upcoming_tasks=[],
-                recent_notes=[],
-                calendar_events=[]
-            )
+            raise Exception(f"Failed to get planner dashboard: {e}")
     
     # ========================================================================
     # NOTE OPERATIONS (Enhanced from existing)

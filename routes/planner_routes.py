@@ -426,7 +426,8 @@ async def get_planner_dashboard(
             ),
             upcoming_tasks=[],
             recent_notes=[],
-            calendar_events=[]
+            calendar_events=[],
+            overdue_tasks=[]
         )
 
 @router.get("/stats")
