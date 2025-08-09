@@ -32,8 +32,17 @@ from models.user_models import (
 )
 from models.document_models import DocumentCreate, DocumentResponse, DocumentUpdate, DocumentGenerationRequest, FormattedGoogleDocRequest
 from models.chat_models import ChatMessage, ChatResponse, EnhancedChatResponse, EnhancedChatMessage
-from models.planner_models import TaskCreate, TaskResponse, TaskUpdate, NoteCreate, NoteResponse
+from models.planner_models import (
+    TaskCreate, TaskResponse, TaskUpdate, TaskStatus, TaskPriority,
+    NoteCreate, NoteResponse, NoteUpdate, 
+    CalendarEventCreate, CalendarEvent, EventType,  # <- Add this line
+    MeetingRecording, RecordingCreate, RecordingUpdate, RecordingStatus,
+    PlannerDashboard, PlannerStats, TaskFilter, QuickTaskCreate
+)
 from services.enhanced_planner_service import EnhancedPlannerService
+
+#Import routes
+from routes.planner_routes import router as planner_router
 
 # Initialize services
 firebase_service = FirebaseService()
@@ -72,6 +81,8 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+app.include_router(planner_router)
 
 # Mount static files for serving uploaded images
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
@@ -1699,281 +1710,6 @@ async def create_formatted_google_doc_from_markdown(
             detail=f"Failed to create Google Doc: {str(e)}"
         )
 
-# ========================================================================
-# ENHANCED TASK MANAGEMENT ROUTES
-# ========================================================================
-
-@app.post("/planner/tasks", response_model=TaskResponse)
-async def create_task(task: TaskCreate, user=Depends(get_current_user)):
-    """Create a new task with optional calendar sync"""
-    try:
-        new_task = await enhanced_planner_service.create_task(task, user["uid"])
-        return new_task
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/planner/tasks", response_model=List[TaskResponse])
-async def get_tasks(
-    completed: Optional[bool] = None,
-    priority: Optional[str] = None,
-    days_ahead: Optional[int] = 30,
-    limit: Optional[int] = None,
-    user=Depends(get_current_user)
-):
-    """Get user tasks with filters"""
-    try:
-        task_priority = None
-        if priority:
-            task_priority = TaskPriority(priority)
-        
-        # Set date range if filtering incomplete tasks
-        due_date_range = None
-        if completed is False and days_ahead:
-            start_date = date.today()
-            end_date = start_date + timedelta(days=days_ahead)
-            due_date_range = (start_date, end_date)
-        
-        tasks = await enhanced_planner_service.get_tasks(
-            user["uid"], 
-            completed=completed,
-            priority=task_priority,
-            due_date_range=due_date_range,
-            limit=limit
-        )
-        return tasks
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/planner/tasks/{task_id}", response_model=TaskResponse)
-async def get_task(task_id: str, user=Depends(get_current_user)):
-    """Get specific task"""
-    try:
-        if not await firebase_service.verify_document_ownership("tasks", task_id, user["uid"]):
-            raise HTTPException(status_code=404, detail="Task not found")
-        
-        task_data = await firebase_service.get_document("tasks", task_id)
-        return TaskResponse(**task_data)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.put("/planner/tasks/{task_id}", response_model=TaskResponse)
-async def update_task(task_id: str, task_update: TaskUpdate, user=Depends(get_current_user)):
-    """Update task with calendar sync"""
-    try:
-        updated_task = await enhanced_planner_service.update_task(
-            task_id, task_update, user["uid"]
-        )
-        return updated_task
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.delete("/planner/tasks/{task_id}")
-async def delete_task(task_id: str, user=Depends(get_current_user)):
-    """Delete task and associated calendar event"""
-    try:
-        success = await enhanced_planner_service.delete_task(task_id, user["uid"])
-        return {"success": success, "message": "Task deleted successfully"}
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/planner/tasks/{task_id}/toggle")
-async def toggle_task_completion(task_id: str, user=Depends(get_current_user)):
-    """Toggle task completion status"""
-    try:
-        # Get current task
-        if not await firebase_service.verify_document_ownership("tasks", task_id, user["uid"]):
-            raise HTTPException(status_code=404, detail="Task not found")
-        
-        current_task = await firebase_service.get_document("tasks", task_id)
-        current_status = TaskStatus(current_task["status"])
-        
-        # Toggle status
-        new_status = TaskStatus.COMPLETED if current_status != TaskStatus.COMPLETED else TaskStatus.TODO
-        
-        task_update = TaskUpdate(status=new_status)
-        updated_task = await enhanced_planner_service.update_task(
-            task_id, task_update, user["uid"]
-        )
-        
-        return updated_task
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ========================================================================
-# CALENDAR INTEGRATION ROUTES
-# ========================================================================
-
-@app.get("/planner/calendar/events")
-async def get_calendar_events(
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    user=Depends(get_current_user)
-):
-    """Get calendar events with optional date range"""
-    try:
-        # Default to next 30 days if no range provided
-        if not start_date:
-            start_date = date.today().isoformat()
-        if not end_date:
-            end_date = (date.today() + timedelta(days=30)).isoformat()
-        
-        events = await google_service.get_calendar_events(user["uid"], start_date, end_date)
-        return {"events": events}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/planner/calendar/sync")
-async def sync_calendar_tasks(
-    days_ahead: int = 30,
-    user=Depends(get_current_user)
-):
-    """Sync tasks with Google Calendar"""
-    try:
-        start_date = date.today()
-        end_date = start_date + timedelta(days=days_ahead)
-        
-        result = await enhanced_planner_service.sync_calendar_tasks(
-            user["uid"], start_date, end_date
-        )
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/planner/calendar/events")
-async def create_calendar_event(
-    event_data: CalendarEventCreate,
-    user=Depends(get_current_user)
-):
-    """Create calendar event"""
-    try:
-        result = await google_service.create_calendar_event(user["uid"], event_data.dict())
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ========================================================================
-# DASHBOARD AND ANALYTICS
-# ========================================================================
-
-@app.get("/planner/dashboard")
-async def get_planner_dashboard(user=Depends(get_current_user)):
-    """Get planner dashboard with stats and upcoming items"""
-    try:
-        dashboard = await enhanced_planner_service.get_planner_dashboard(user["uid"])
-        return dashboard
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/planner/stats")
-async def get_planner_stats(user=Depends(get_current_user)):
-    """Get planner statistics"""
-    try:
-        dashboard = await enhanced_planner_service.get_planner_dashboard(user["uid"])
-        return dashboard.stats
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ========================================================================
-# ENHANCED NOTES ROUTES
-# ========================================================================
-
-@app.post("/planner/notes", response_model=NoteResponse)
-async def create_note(note: NoteCreate, user=Depends(get_current_user)):
-    """Create a new note"""
-    try:
-        new_note = await enhanced_planner_service.create_note(note, user["uid"])
-        return new_note
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/planner/notes", response_model=List[NoteResponse])
-async def get_notes(limit: Optional[int] = None, user=Depends(get_current_user)):
-    """Get user notes"""
-    try:
-        notes = await enhanced_planner_service.get_notes(user["uid"], limit)
-        return notes
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/planner/notes/{note_id}/export-google")
-async def export_note_to_google_keep(
-    note_id: str,
-    user=Depends(get_current_user)
-):
-    """Export note to Google Keep"""
-    try:
-        if not await firebase_service.verify_document_ownership("notes", note_id, user["uid"]):
-            raise HTTPException(status_code=404, detail="Note not found")
-        
-        note = await firebase_service.get_document("notes", note_id)
-        result = await google_service.create_keep_note(
-            user["uid"], note["title"], note["content"]
-        )
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ========================================================================
-# BATCH OPERATIONS
-# ========================================================================
-
-@app.post("/planner/tasks/batch")
-async def batch_create_tasks(
-    tasks: List[TaskCreate],
-    user=Depends(get_current_user)
-):
-    """Create multiple tasks at once"""
-    try:
-        created_tasks = []
-        for task in tasks:
-            created_task = await enhanced_planner_service.create_task(task, user["uid"])
-            created_tasks.append(created_task)
-        
-        return {"created": len(created_tasks), "tasks": created_tasks}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.put("/planner/tasks/batch")
-async def batch_update_tasks(
-    updates: List[Dict[str, Any]],  # [{"id": "task_id", "update": TaskUpdate}]
-    user=Depends(get_current_user)
-):
-    """Update multiple tasks at once"""
-    try:
-        updated_tasks = []
-        for update_item in updates:
-            task_id = update_item["id"]
-            task_update = TaskUpdate(**update_item["update"])
-            
-            updated_task = await enhanced_planner_service.update_task(
-                task_id, task_update, user["uid"]
-            )
-            updated_tasks.append(updated_task)
-        
-        return {"updated": len(updated_tasks), "tasks": updated_tasks}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.delete("/planner/tasks/completed")
-async def delete_completed_tasks(user=Depends(get_current_user)):
-    """Delete all completed tasks"""
-    try:
-        completed_tasks = await enhanced_planner_service.get_tasks(
-            user["uid"], completed=True
-        )
-        
-        deleted_count = 0
-        for task in completed_tasks:
-            await enhanced_planner_service.delete_task(task.id, user["uid"])
-            deleted_count += 1
-        
-        return {"deleted": deleted_count, "message": f"Deleted {deleted_count} completed tasks"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     uvicorn.run(
