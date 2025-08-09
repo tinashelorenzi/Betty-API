@@ -68,15 +68,21 @@ class FirebaseService:
     
     def get_user_document_ref(self, uid: str):
         """Get reference to user document"""
+        if not self._initialized or not self.db:
+            raise RuntimeError("Firebase service not initialized")
         return self.db.document(f"users/{uid}")
     
     def get_user_collection_ref(self, uid: str, collection_name: str):
         """Get reference to user's subcollection"""
+        if not self._initialized or not self.db:
+            raise RuntimeError("Firebase service not initialized")
         return self.db.document(f"users/{uid}").collection(collection_name)
     
     async def create_user_profile(self, uid: str, user_data: Dict[str, Any]) -> bool:
         """Create user profile document"""
         try:
+            if not self._initialized or not self.db:
+                raise RuntimeError("Firebase service not initialized")
             user_ref = self.get_user_document_ref(uid)
             user_data['uid'] = uid
             user_data['created_at'] = datetime.utcnow()
@@ -92,6 +98,8 @@ class FirebaseService:
     async def get_user_profile(self, uid: str) -> Optional[Dict[str, Any]]:
         """Get user profile data"""
         try:
+            if not self._initialized or not self.db:
+                raise RuntimeError("Firebase service not initialized")
             user_ref = self.get_user_document_ref(uid)
             doc = user_ref.get()
             
@@ -162,6 +170,10 @@ class FirebaseService:
         """Get server base URL for constructing file URLs"""
         return self.server_base_url
     
+    def is_initialized(self) -> bool:
+        """Check if Firebase service is properly initialized"""
+        return self._initialized and self.db is not None
+    
     def build_avatar_url(self, filename: str) -> Optional[str]:
         """Build full avatar URL from filename stored in database"""
         if filename:
@@ -181,6 +193,8 @@ class FirebaseService:
     async def create_document(self, collection: str, data: Dict[str, Any], doc_id: str = None) -> str:
         """Create a document in the specified collection"""
         try:
+            if not self._initialized or not self.db:
+                raise RuntimeError("Firebase service not initialized")
             if not doc_id:
                 doc_id = str(uuid.uuid4())
             
@@ -202,6 +216,8 @@ class FirebaseService:
     async def get_document(self, collection: str, doc_id: str) -> Optional[Dict[str, Any]]:
         """Get a document by ID"""
         try:
+            if not self._initialized or not self.db:
+                raise RuntimeError("Firebase service not initialized")
             doc_ref = self.db.collection(collection).document(doc_id)
             doc = doc_ref.get()
             
@@ -219,6 +235,8 @@ class FirebaseService:
     async def update_document(self, collection: str, doc_id: str, update_data: Dict[str, Any]) -> bool:
         """Update a document"""
         try:
+            if not self._initialized or not self.db:
+                raise RuntimeError("Firebase service not initialized")
             doc_ref = self.db.collection(collection).document(doc_id)
             update_data['updated_at'] = datetime.utcnow()
             doc_ref.update(update_data)
@@ -233,6 +251,8 @@ class FirebaseService:
     async def delete_document(self, collection: str, doc_id: str) -> bool:
         """Delete a document"""
         try:
+            if not self._initialized or not self.db:
+                raise RuntimeError("Firebase service not initialized")
             doc_ref = self.db.collection(collection).document(doc_id)
             doc_ref.delete()
             
@@ -252,6 +272,8 @@ class FirebaseService:
     ) -> List[Dict[str, Any]]:
         """Query documents with optional filters"""
         try:
+            if not self._initialized or not self.db:
+                raise RuntimeError("Firebase service not initialized")
             query = self.db.collection(collection)
             
             # Apply filters
@@ -293,6 +315,8 @@ class FirebaseService:
     ) -> List[Dict[str, Any]]:
         """Get documents for a specific user"""
         try:
+            if not self._initialized or not self.db:
+                raise RuntimeError("Firebase service not initialized")
             filters = [("user_id", "==", user_id)]
             return await self.query_documents(
                 collection=collection,
@@ -324,6 +348,8 @@ class FirebaseService:
     async def create_user_document(self, uid: str, collection_name: str, data: Dict[str, Any], doc_id: str = None) -> str:
         """Create document in user's subcollection"""
         try:
+            if not self._initialized or not self.db:
+                raise RuntimeError("Firebase service not initialized")
             if not doc_id:
                 doc_id = str(uuid.uuid4())
             
@@ -347,6 +373,8 @@ class FirebaseService:
     async def get_user_document(self, uid: str, collection_name: str, doc_id: str) -> Optional[Dict[str, Any]]:
         """Get document from user's subcollection"""
         try:
+            if not self._initialized or not self.db:
+                raise RuntimeError("Firebase service not initialized")
             doc_ref = self.get_user_collection_ref(uid, collection_name).document(doc_id)
             doc = doc_ref.get()
             
@@ -391,6 +419,8 @@ class FirebaseService:
     async def initialize_user_indexes(self, uid: str) -> bool:
         """Initialize user document with empty indexes and stats"""
         try:
+            if not self._initialized or not self.db:
+                raise RuntimeError("Firebase service not initialized")
             user_ref = self.get_user_document_ref(uid)
             doc = user_ref.get()
             
@@ -436,6 +466,8 @@ class FirebaseService:
     async def add_to_user_index(self, uid: str, index_type: str, item_id: str) -> bool:
         """Add item to user's index and update stats"""
         try:
+            if not self._initialized or not self.db:
+                raise RuntimeError("Firebase service not initialized")
             user_ref = self.get_user_document_ref(uid)
             
             # Get current data
@@ -476,6 +508,8 @@ class FirebaseService:
     async def remove_from_user_index(self, uid: str, index_type: str, item_id: str) -> bool:
         """Remove item from user's index and update stats"""
         try:
+            if not self._initialized or not self.db:
+                raise RuntimeError("Firebase service not initialized")
             user_ref = self.get_user_document_ref(uid)
             doc = user_ref.get()
             
@@ -513,6 +547,8 @@ class FirebaseService:
     async def get_user_indexes(self, uid: str) -> Dict[str, List[str]]:
         """Get user's document indexes"""
         try:
+            if not self._initialized or not self.db:
+                raise RuntimeError("Firebase service not initialized")
             user_ref = self.get_user_document_ref(uid)
             doc = user_ref.get()
             
@@ -537,6 +573,8 @@ class FirebaseService:
 ) -> List[Dict[str, Any]]:
         """Get user's items using their index (super fast!)"""
         try:
+            if not self._initialized or not self.db:
+                raise RuntimeError("Firebase service not initialized")
             indexes = await self.get_user_indexes(uid)
             item_ids = indexes.get(index_type, [])
             
@@ -617,6 +655,8 @@ class FirebaseService:
     ) -> bool:
         """Save chat messages and update user stats efficiently"""
         try:
+            if not self._initialized or not self.db:
+                raise RuntimeError("Firebase service not initialized")
             # Create message records
             timestamp = datetime.utcnow()
             
@@ -655,6 +695,8 @@ class FirebaseService:
     async def update_user_message_stats_efficient(self, uid: str, message_count: int = 1) -> bool:
         """Update user message stats efficiently without reading all messages"""
         try:
+            if not self._initialized or not self.db:
+                raise RuntimeError("Firebase service not initialized")
             user_ref = self.get_user_document_ref(uid)
             
             # Get current stats
@@ -687,6 +729,8 @@ class FirebaseService:
     async def update_user_stats(self, uid: str, stat_updates: Dict[str, Any]) -> bool:
         """Update specific user statistics"""
         try:
+            if not self._initialized or not self.db:
+                raise RuntimeError("Firebase service not initialized")
             user_ref = self.get_user_document_ref(uid)
             doc = user_ref.get()
             
@@ -765,6 +809,8 @@ class FirebaseService:
     async def migrate_user_to_indexed_structure(self, uid: str) -> bool:
         """Migrate existing user data to indexed structure"""
         try:
+            if not self._initialized or not self.db:
+                raise RuntimeError("Firebase service not initialized")
             print(f"🔄 Migrating user {uid} to indexed structure...")
             
             # Initialize user indexes
