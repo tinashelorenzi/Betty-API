@@ -103,7 +103,7 @@ async def get_tasks(
         
         # Set search filter
         if search:
-            task_filter.search = search
+            task_filter.search_term = search
         
         print(f"Getting tasks with filter: {task_filter}")  # Debug log
         
