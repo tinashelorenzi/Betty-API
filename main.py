@@ -262,6 +262,118 @@ async def get_me(user=Depends(get_current_user)):
 # PROFILE ROUTES
 # ============================================================================
 
+@app.post("/auth/google/connect-native")
+async def connect_google_account_native(
+    request_data: dict,
+    user=Depends(get_current_user)
+):
+    """Connect Google account using native sign-in tokens"""
+    try:
+        access_token = request_data.get("access_token")
+        id_token_str = request_data.get("id_token")
+        server_auth_code = request_data.get("server_auth_code")
+        user_info_client = request_data.get("user_info")
+
+        if not access_token or not id_token_str:
+            raise HTTPException(
+                status_code=400, 
+                detail="Missing access_token or id_token"
+            )
+
+        # Verify the ID token
+        try:
+            # Verify and decode the ID token
+            id_info = id_token.verify_oauth2_token(
+                id_token_str, 
+                google_requests.Request(), 
+                os.getenv("GOOGLE_CLIENT_ID")
+            )
+            
+            if id_info['iss'] not in ['accounts.google.com', 'https://accounts.google.com']:
+                raise ValueError('Invalid issuer.')
+                
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid ID token: {e}")
+
+        # Exchange server auth code for refresh token (if provided)
+        credentials_data = {
+            "access_token": access_token,
+            "id_token": id_token_str,
+            "token_type": "Bearer",
+            "client_id": os.getenv("GOOGLE_CLIENT_ID"),
+            "client_secret": os.getenv("GOOGLE_CLIENT_SECRET"),
+            "scopes": [
+                'openid',
+                'https://www.googleapis.com/auth/userinfo.email',
+                'https://www.googleapis.com/auth/userinfo.profile',
+                'https://www.googleapis.com/auth/drive.file',
+                'https://www.googleapis.com/auth/documents',
+                'https://www.googleapis.com/auth/calendar'
+            ]
+        }
+
+        # If server auth code is provided, exchange it for refresh token
+        if server_auth_code:
+            try:
+                token_response = requests.post(
+                    'https://oauth2.googleapis.com/token',
+                    data={
+                        'client_id': os.getenv("GOOGLE_CLIENT_ID"),
+                        'client_secret': os.getenv("GOOGLE_CLIENT_SECRET"),
+                        'code': server_auth_code,
+                        'grant_type': 'authorization_code',
+                        'redirect_uri': '',  # Empty for mobile
+                    }
+                )
+                
+                if token_response.ok:
+                    token_data = token_response.json()
+                    credentials_data["refresh_token"] = token_data.get("refresh_token")
+                    
+            except Exception as e:
+                print(f"Failed to exchange server auth code: {e}")
+
+        # Store tokens in Firebase
+        tokens_data = {
+            **credentials_data,
+            "google_user_info": id_info,
+            "connected_at": datetime.utcnow(),
+            "connection_type": "native"
+        }
+
+        await firebase_service.create_document(
+            "google_tokens", 
+            {"tokens": tokens_data}, 
+            doc_id=user["uid"]
+        )
+
+        # Update user profile
+        await firebase_service.update_user_profile(user["uid"], {
+            "google_connected": True,
+            "google_email": id_info.get("email"),
+            "google_name": id_info.get("name"),
+            "google_picture": id_info.get("picture"),
+            "google_connected_at": datetime.utcnow()
+        })
+
+        return {
+            "success": True,
+            "user_info": {
+                "email": id_info.get("email"),
+                "name": id_info.get("name"),
+                "picture": id_info.get("picture")
+            },
+            "message": "Google account connected successfully"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Failed to connect Google account: {str(e)}"
+        )
+
 @app.get("/profile/me", response_model=UserResponse)
 async def get_my_profile(user=Depends(get_current_user)):
     """Get current user's profile information"""
