@@ -79,56 +79,7 @@ enhanced_planner_service = EnhancedPlannerService(firebase_service, google_servi
 
 security = HTTPBearer()
 
-# Debug router endpoints
-from fastapi import APIRouter
 
-debug_router = APIRouter(prefix="/debug", tags=["debug"])
-
-@debug_router.post("/log")
-async def receive_debug_log(
-    log_data: DebugLog,
-    user=Depends(get_current_user)  # Ensure user is authenticated
-):
-    """Receive debug logs from the mobile app"""
-    try:
-        # Format the log message
-        log_message = f"[{log_data.platform}] [{log_data.component}] {log_data.message}"
-        if log_data.data:
-            log_message += f" | Data: {log_data.data}"
-        
-        # Log to console and file based on level
-        if log_data.level == "error":
-            logger.error(log_message)
-        elif log_data.level == "info":
-            logger.info(log_message)
-        elif log_data.level == "debug":
-            logger.debug(log_message)
-        else:
-            logger.info(log_message)
-        
-        # Also print to console for immediate visibility
-        print(f"🐛 DEBUG [{log_data.timestamp}] [{user.get('email', 'unknown')}] {log_message}")
-        
-        return {"status": "logged", "timestamp": datetime.utcnow().isoformat()}
-        
-    except Exception as e:
-        print(f"❌ Error logging debug message: {e}")
-        return {"status": "error", "error": str(e)}
-
-@debug_router.get("/logs")
-async def get_recent_logs(
-    lines: int = 50,
-    user=Depends(get_current_user)  # Ensure user is authenticated
-):
-    """Get recent debug logs"""
-    try:
-        with open('debug_logs.txt', 'r') as f:
-            logs = f.readlines()
-            return {"logs": logs[-lines:]}
-    except FileNotFoundError:
-        return {"logs": [], "message": "No debug logs found"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -158,7 +109,6 @@ app = FastAPI(
 
 app.include_router(planner_router)
 app.include_router(auth_router)
-app.include_router(debug_router) # Include the debug router
 # Mount static files for serving uploaded images
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
@@ -287,6 +237,60 @@ async def get_admin_user(current_user = Depends(get_current_user)):
             status_code=500, 
             detail=f"Admin verification failed: {str(e)}"
         )
+
+# Debug router endpoints
+from fastapi import APIRouter
+
+debug_router = APIRouter(prefix="/debug", tags=["debug"])
+
+@debug_router.post("/log")
+async def receive_debug_log(
+    log_data: DebugLog,
+    user=Depends(get_current_user)  # Ensure user is authenticated
+):
+    """Receive debug logs from the mobile app"""
+    try:
+        # Format the log message
+        log_message = f"[{log_data.platform}] [{log_data.component}] {log_data.message}"
+        if log_data.data:
+            log_message += f" | Data: {log_data.data}"
+        
+        # Log to console and file based on level
+        if log_data.level == "error":
+            logger.error(log_message)
+        elif log_data.level == "info":
+            logger.info(log_message)
+        elif log_data.level == "debug":
+            logger.debug(log_message)
+        else:
+            logger.info(log_message)
+        
+        # Also print to console for immediate visibility
+        print(f"🐛 DEBUG [{log_data.timestamp}] [{user.get('email', 'unknown')}] {log_message}")
+        
+        return {"status": "logged", "timestamp": datetime.utcnow().isoformat()}
+        
+    except Exception as e:
+        print(f"❌ Error logging debug message: {e}")
+        return {"status": "error", "error": str(e)}
+
+@debug_router.get("/logs")
+async def get_recent_logs(
+    lines: int = 50,
+    user=Depends(get_current_user)  # Ensure user is authenticated
+):
+    """Get recent debug logs"""
+    try:
+        with open('debug_logs.txt', 'r') as f:
+            logs = f.readlines()
+            return {"logs": logs[-lines:]}
+    except FileNotFoundError:
+        return {"logs": [], "message": "No debug logs found"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Include the debug router in the app
+app.include_router(debug_router)
 
 # Health check
 @app.get("/health")
