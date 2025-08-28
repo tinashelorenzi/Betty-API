@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from typing import List, Dict, Any
 import logging
 from pydantic import BaseModel
+from google.auth.transport import requests as google_requests
+from google.oauth2 import id_token
 
 # Load environment variables from .env file
 load_dotenv()
