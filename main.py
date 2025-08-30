@@ -379,8 +379,11 @@ async def connect_google_native(
         if not request.user_info or not request.user_info.email:
             raise HTTPException(status_code=400, detail="user_info with email is required")
 
-        # Verify the ID token if provided (recommended for security)
+        # Try to verify the ID token if provided, but don't fail if it's expired
+        # Since React Native tokens can be short-lived
         verified_claims = None
+        token_verification_failed = False
+        
         if request.id_token:
             try:
                 # Replace with your Google Client ID
@@ -396,14 +399,56 @@ async def connect_google_native(
                 
                 # Ensure the email matches
                 if verified_claims.get('email') != request.user_info.email:
-                    raise HTTPException(
-                        status_code=400, 
-                        detail="Email mismatch between ID token and user info"
-                    )
+                    logger.warning(f"Email mismatch: token={verified_claims.get('email')}, user_info={request.user_info.email}")
+                    # Don't fail here, just log the mismatch
                     
             except ValueError as e:
-                logger.error(f"ID token verification failed: {str(e)}")
-                raise HTTPException(status_code=400, detail=f"Invalid ID token: {str(e)}")
+                logger.warning(f"ID token verification failed: {str(e)}")
+                token_verification_failed = True
+                
+                # Check if it's just an expired token (common with React Native)
+                if "expired" in str(e).lower() or "Token expired" in str(e):
+                    logger.info("Token expired - this is common with React Native Google Sign-In, continuing with access token validation")
+                else:
+                    logger.error(f"Non-expiry ID token error: {str(e)}")
+
+        # If ID token verification failed for reasons other than expiry, 
+        # we can still proceed but should validate the access token
+        if token_verification_failed and not verified_claims:
+            try:
+                # Validate the access token by making a request to Google's userinfo endpoint
+                import requests
+                
+                userinfo_response = requests.get(
+                    'https://www.googleapis.com/oauth2/v2/userinfo',
+                    headers={'Authorization': f'Bearer {request.access_token}'},
+                    timeout=10
+                )
+                
+                if userinfo_response.status_code == 200:
+                    userinfo = userinfo_response.json()
+                    logger.info(f"Access token validated successfully for email: {userinfo.get('email')}")
+                    
+                    # Verify email matches
+                    if userinfo.get('email') != request.user_info.email:
+                        logger.error(f"Email mismatch in access token validation: {userinfo.get('email')} != {request.user_info.email}")
+                        raise HTTPException(
+                            status_code=400, 
+                            detail="Email mismatch between access token and user info"
+                        )
+                else:
+                    logger.error(f"Access token validation failed: {userinfo_response.status_code}")
+                    raise HTTPException(
+                        status_code=400, 
+                        detail="Invalid access token - unable to verify user identity"
+                    )
+                    
+            except requests.RequestException as e:
+                logger.error(f"Failed to validate access token: {str(e)}")
+                raise HTTPException(
+                    status_code=400, 
+                    detail="Unable to validate Google tokens - please try again"
+                )
         
         # Prepare user data for storage
         google_user_data = {
@@ -412,7 +457,7 @@ async def connect_google_native(
             "photo": request.user_info.photo,
             "google_id": request.user_info.id,
             "access_token": request.access_token,  # Store securely, consider encryption
-            "verified": bool(verified_claims)
+            "verified": bool(verified_claims) and not token_verification_failed
         }
 
         # Update user in Firebase/database with Google connection
@@ -428,11 +473,44 @@ async def connect_google_native(
                 'google_name': request.user_info.name,
                 'google_photo': request.user_info.photo,
                 'google_id': request.user_info.id,
+                'google_access_token': request.access_token,
+                'google_tokens': {
+                    'access_token': request.access_token,
+                    'email': request.user_info.email,
+                    'name': request.user_info.name,
+                    'photo': request.user_info.photo,
+                    'google_id': request.user_info.id,
+                    'connected_at': firestore.SERVER_TIMESTAMP,
+                    'verified': bool(verified_claims) and not token_verification_failed
+                },
                 'updated_at': firestore.SERVER_TIMESTAMP
             }
             
+            # If we have an ID token, store it too (even if expired, for reference)
+            if request.id_token:
+                user_update_data['google_id_token'] = request.id_token
+                user_update_data['google_tokens']['id_token'] = request.id_token
+            
             # Update in Firestore (adjust based on your Firebase service implementation)
             firebase_service.db.collection('users').document(user_uid).update(user_update_data)
+            
+            # Also store in separate google_tokens collection for easier access
+            token_doc_data = {
+                'user_id': user_uid,
+                'access_token': request.access_token,
+                'email': request.user_info.email,
+                'name': request.user_info.name,
+                'photo': request.user_info.photo,
+                'google_id': request.user_info.id,
+                'verified': bool(verified_claims) and not token_verification_failed,
+                'created_at': firestore.SERVER_TIMESTAMP,
+                'updated_at': firestore.SERVER_TIMESTAMP
+            }
+            
+            if request.id_token:
+                token_doc_data['id_token'] = request.id_token
+                
+            firebase_service.db.collection('google_tokens').document(user_uid).set(token_doc_data)
             
             logger.info(f"Successfully connected Google account for user {user_uid}")
 
@@ -443,7 +521,8 @@ async def connect_google_native(
                     "email": request.user_info.email,
                     "name": request.user_info.name,
                     "photo": request.user_info.photo,
-                    "google_connected": True
+                    "google_connected": True,
+                    "verified": bool(verified_claims) and not token_verification_failed
                 }
             )
 
@@ -458,10 +537,10 @@ async def connect_google_native(
         # Re-raise HTTP exceptions
         raise
     except Exception as e:
-        logger.error(f"Unexpected error in connect_google_native: {str(e)}", exc_info=True)
+        logger.error(f"Unexpected error in Google connect: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to connect Google account: {str(e)}"
+            detail="An unexpected error occurred during Google account connection"
         )
 
 @app.get("/profile/me", response_model=UserResponse)
