@@ -383,225 +383,96 @@ async def get_me(user=Depends(get_current_user)):
 # PROFILE ROUTES
 # ============================================================================
 
-@app.post("/auth/google/connect-native", response_model=GoogleConnectResponse)
+@app.post("/auth/google/connect-native", response_model=dict)
 async def connect_google_native(
-    request: GoogleConnectNativeRequest,
-    current_user = Depends(get_current_user)  # Your existing auth dependency
+    request: dict,
+    current_user = Depends(get_current_user)
 ):
-    """
-    Connect a user's Google account using native mobile authentication.
-    This endpoint receives tokens from React Native Google Sign-In.
-    Enhanced with comprehensive error handling and validation.
-    """
+    """Connect Google account from React Native"""
     try:
-        user_uid = current_user.get('uid')
-        logger.info(f"Processing Google connect request for user: {user_uid}")
-        logger.debug(f"Request data: access_token present={bool(request.access_token)}, id_token present={bool(request.id_token)}")
+        logger.info(f"Processing Google connect request for user: {current_user.get('uid')}")
         
-        # Enhanced validation with better error messages
-        if not request.access_token or request.access_token.strip() == "":
-            logger.error("Missing or empty access_token")
-            raise HTTPException(
-                status_code=400, 
-                detail="Google access token is required for authentication"
-            )
+        access_token = request.get('access_token')
+        user_info = request.get('user_info', {})
         
-        if not request.user_info:
-            logger.error("Missing user_info in request")
-            raise HTTPException(
-                status_code=400, 
-                detail="Google user information is required"
-            )
-            
-        if not request.user_info.email or request.user_info.email.strip() == "":
-            logger.error("Missing or empty email in user_info")
-            raise HTTPException(
-                status_code=400, 
-                detail="Google account email is required. Please ensure you have granted email permission to the app."
-            )
-
-        # Validate email format
-        import re
-        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-        if not re.match(email_pattern, request.user_info.email.strip()):
-            logger.error(f"Invalid email format: {request.user_info.email}")
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid email format received from Google account"
-            )
-
-        # Clean and validate user info
-        cleaned_user_info = {
-            "email": request.user_info.email.strip().lower(),
-            "name": (request.user_info.name or "").strip() or "Google User",
-            "photo": (request.user_info.photo or "").strip() if request.user_info.photo else None,
-            "id": (request.user_info.id or "").strip() or "unknown"
-        }
-
-        # Try to verify the ID token if provided, but don't fail if it's expired
-        verified_claims = None
-        token_verification_failed = False
+        if not access_token:
+            raise HTTPException(status_code=400, detail="access_token is required")
         
-        if request.id_token and request.id_token.strip():
-            try:
-                GOOGLE_CLIENT_ID = "1092345143344-vd984vtn6cdo6tlid624r5aqhi0ov331.apps.googleusercontent.com"
-                
-                # Verify the ID token
-                verified_claims = id_token.verify_oauth2_token(
-                    request.id_token.strip(), 
-                    google_requests.Request(), 
-                    GOOGLE_CLIENT_ID
-                )
-                logger.info(f"ID token verified successfully for email: {verified_claims.get('email')}")
-                
-                # Ensure the email matches (case-insensitive comparison)
-                token_email = verified_claims.get('email', '').strip().lower()
-                if token_email != cleaned_user_info["email"]:
-                    logger.warning(f"Email mismatch: token={token_email}, user_info={cleaned_user_info['email']}")
-                    # Don't fail here for mobile apps, just log the mismatch
-                    
-            except ValueError as e:
-                logger.warning(f"ID token verification failed: {str(e)}")
-                token_verification_failed = True
-                
-                # Check if it's just an expired token (common with React Native)
-                if "expired" in str(e).lower() or "Token expired" in str(e):
-                    logger.info("Token expired - common with React Native Google Sign-In, continuing with access token validation")
-                else:
-                    logger.error(f"Non-expiry ID token error: {str(e)}")
+        if not user_info.get('email'):
+            raise HTTPException(status_code=400, detail="user_info with email is required")
 
-        # If ID token verification failed for reasons other than expiry, 
-        # validate the access token by making a request to Google's userinfo endpoint
-        if token_verification_failed and not verified_claims:
-            try:
-                import requests
-                
-                logger.info("Validating access token with Google userinfo endpoint")
-                userinfo_response = requests.get(
-                    'https://www.googleapis.com/oauth2/v2/userinfo',
-                    headers={'Authorization': f'Bearer {request.access_token}'},
-                    timeout=15
-                )
-                
-                if userinfo_response.status_code == 200:
-                    userinfo = userinfo_response.json()
-                    logger.info(f"Access token validated successfully for email: {userinfo.get('email')}")
-                    
-                    # Verify email matches (case-insensitive)
-                    api_email = userinfo.get('email', '').strip().lower()
-                    if api_email != cleaned_user_info["email"]:
-                        logger.error(f"Email mismatch in access token validation: {api_email} != {cleaned_user_info['email']}")
-                        raise HTTPException(
-                            status_code=400, 
-                            detail="Email mismatch between access token and provided user info. Please try signing out and signing back into Google."
-                        )
-                    
-                    # Update user info with verified data from Google API
-                    cleaned_user_info.update({
-                        "name": userinfo.get('name') or cleaned_user_info["name"],
-                        "photo": userinfo.get('picture') or cleaned_user_info["photo"],
-                        "id": userinfo.get('id') or cleaned_user_info["id"]
-                    })
-                    
-                elif userinfo_response.status_code == 401:
-                    logger.error("Access token is invalid or expired")
-                    raise HTTPException(
-                        status_code=400, 
-                        detail="Google access token is invalid or expired. Please sign out of Google and sign back in."
-                    )
-                else:
-                    logger.error(f"Access token validation failed: {userinfo_response.status_code} - {userinfo_response.text}")
-                    raise HTTPException(
-                        status_code=400, 
-                        detail="Unable to verify Google access token. Please try signing out and signing back into Google."
-                    )
-                    
-            except requests.RequestException as e:
-                logger.error(f"Failed to validate access token: {str(e)}")
-                raise HTTPException(
-                    status_code=503, 
-                    detail="Unable to validate Google tokens due to network issues. Please try again."
-                )
-            except Exception as e:
-                logger.error(f"Unexpected error during access token validation: {str(e)}")
-                raise HTTPException(
-                    status_code=500,
-                    detail="An unexpected error occurred while validating Google credentials"
-                )
-        
-        # Store the Google connection data in Firestore
+        # Validate access token with Google
         try:
-            logger.info(f"Storing Google connection data for user {user_uid}")
+            import requests
+            userinfo_response = requests.get(
+                'https://www.googleapis.com/oauth2/v2/userinfo',
+                headers={'Authorization': f'Bearer {access_token}'},
+                timeout=10
+            )
             
-            # Prepare data for storage
-            google_connection_data = {
-                "google_access_token": request.access_token,
-                "google_user_info": cleaned_user_info,
-                "google_connected": True,
-                "google_connected_at": datetime.utcnow().isoformat(),
-                "last_google_sync": datetime.utcnow().isoformat(),
-                "google_verified": bool(verified_claims) and not token_verification_failed
-            }
-            
-            # Store ID token if provided and valid
-            if request.id_token and not token_verification_failed:
-                google_connection_data["google_id_token"] = request.id_token
-
-            # Update user profile in Firestore
-            user_ref = firebase_service.db.collection('users').document(user_uid)
-            user_ref.update(google_connection_data)
-            
-            # Also store tokens in separate google_tokens collection for better organization
-            google_tokens_data = {
-                "user_id": user_uid,
-                "access_token": request.access_token,
-                "created_at": datetime.utcnow().isoformat(),
-                "updated_at": datetime.utcnow().isoformat(),
-                "user_email": cleaned_user_info["email"],
-                "verified": bool(verified_claims) and not token_verification_failed
-            }
-            
-            if request.id_token and not token_verification_failed:
-                google_tokens_data["id_token"] = request.id_token
+            if userinfo_response.status_code != 200:
+                raise HTTPException(status_code=400, detail="Invalid Google access token")
                 
-            google_tokens_ref = firebase_service.db.collection('google_tokens').document(user_uid)
-            google_tokens_ref.set(google_tokens_data)
+            google_userinfo = userinfo_response.json()
             
-            logger.info(f"Successfully connected Google account for user {user_uid} with email {cleaned_user_info['email']}")
+            # Verify email matches
+            if google_userinfo.get('email') != user_info.get('email'):
+                raise HTTPException(status_code=400, detail="Email mismatch in Google token")
+                
+        except requests.RequestException:
+            raise HTTPException(status_code=400, detail="Failed to validate Google token")
 
-            return GoogleConnectResponse(
-                success=True,
-                message="Google account connected successfully",
-                user_info={
-                    "email": cleaned_user_info["email"],
-                    "name": cleaned_user_info["name"],
-                    "photo": cleaned_user_info["photo"],
-                    "google_connected": True,
-                    "verified": bool(verified_claims) and not token_verification_failed,
-                    "user_email": cleaned_user_info["email"]  # For backward compatibility
-                },
-                google_connected=True
-            )
+        # Update user in Firebase
+        user_uid = current_user.get('uid')
+        if not user_uid:
+            raise HTTPException(status_code=401, detail="Invalid user session")
 
-        except Exception as db_error:
-            logger.error(f"Database update failed: {str(db_error)}")
-            logger.error(f"Database error details: {type(db_error).__name__}: {db_error}")
-            raise HTTPException(
-                status_code=500, 
-                detail=f"Failed to save Google connection to database. Please try again. If the problem persists, contact support."
-            )
-
-    except HTTPException:
-        # Re-raise HTTP exceptions as-is
-        raise
+        update_data = {
+            'google_connected': True,
+            'google_email': user_info.get('email'),
+            'google_name': user_info.get('name'),
+            'google_photo': user_info.get('photo'),
+            'google_id': user_info.get('id'),
+            'google_access_token': access_token,
+            'google_tokens': {
+                'access_token': access_token,
+                'email': user_info.get('email'),
+                'name': user_info.get('name'),
+                'photo': user_info.get('photo'),
+                'google_id': user_info.get('id'),
+                'connected_at': firestore.SERVER_TIMESTAMP,
+                'verified': True
+            },
+            'updated_at': firestore.SERVER_TIMESTAMP
+        }
+        
+        firebase_service.db.collection('users').document(user_uid).update(update_data)
+        
+        # Store in google_tokens collection
+        firebase_service.db.collection('google_tokens').document(user_uid).set({
+            'user_id': user_uid,
+            'access_token': access_token,
+            'email': user_info.get('email'),
+            'name': user_info.get('name'),
+            'photo': user_info.get('photo'),
+            'google_id': user_info.get('id'),
+            'verified': True,
+            'created_at': firestore.SERVER_TIMESTAMP,
+            'updated_at': firestore.SERVER_TIMESTAMP
+        })
+        
+        logger.info(f"✅ Google account connected successfully for user {user_uid}")
+        
+        return {
+            "success": True,
+            "message": "Google account connected successfully",
+            "user_info": user_info
+        }
+        
     except Exception as e:
-        logger.error(f"Unexpected error in Google connect: {str(e)}")
-        logger.error(f"Error type: {type(e).__name__}")
-        logger.error(f"Error details: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail="An unexpected error occurred during Google account connection. Please try again."
-        )
+        logger.error(f"❌ Google connect error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to connect Google account: {str(e)}")
+
 
 @app.get("/profile/me", response_model=UserResponse)
 async def get_my_profile(user=Depends(get_current_user)):
@@ -867,73 +738,73 @@ async def google_oauth_callback(code: str = None, state: str = None, error: str 
 
 
 @app.post("/auth/google/disconnect")
-async def disconnect_google_account(current_user = Depends(get_current_user)):
-    """Disconnect the user's Google account"""
+async def disconnect_google(current_user = Depends(get_current_user)):
+    """Disconnect Google account"""
     try:
         user_uid = current_user.get('uid')
         if not user_uid:
-            raise HTTPException(status_code=401, detail="Invalid user session")
-
-        # Update user record
-        user_update_data = {
+            raise HTTPException(status_code=401, detail="Invalid user")
+        
+        # Update user profile
+        firebase_service.db.collection('users').document(user_uid).update({
             'google_connected': False,
-            'google_email': None,
-            'google_name': None,
-            'google_photo': None,
-            'google_id': None,
-            'google_access_token': None,
-            'google_id_token': None,
-            'google_tokens': None,
+            'google_access_token': firestore.DELETE_FIELD,
+            'google_tokens': firestore.DELETE_FIELD,
             'updated_at': firestore.SERVER_TIMESTAMP
-        }
+        })
         
-        firebase_service.db.collection('users').document(user_uid).update(user_update_data)
+        # Delete from google_tokens collection
+        firebase_service.db.collection('google_tokens').document(user_uid).delete()
         
-        # Remove from google_connections collection
-        firebase_service.db.collection('google_connections').document(user_uid).delete()
-        
-        logger.info(f"✅ Google account disconnected for user: {user_uid}")
-        return {"success": True, "message": "Google account disconnected successfully"}
+        return {"success": True, "message": "Google account disconnected"}
         
     except Exception as e:
-        logger.error(f"❌ Error disconnecting Google account: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to disconnect Google account")
+        logger.error(f"❌ Error disconnecting Google: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to disconnect Google account: {str(e)}")
+
 
 @app.get("/auth/google/status")
-async def get_google_connection_status(current_user = Depends(get_current_user)):
-    """Get the current Google connection status for the user"""
+async def google_status(current_user = Depends(get_current_user)):
+    """Check Google connection status"""
     try:
         user_uid = current_user.get('uid')
         if not user_uid:
-            raise HTTPException(status_code=401, detail="Invalid user session")
-
-        # Check if user has Google connection
-        try:
-            connection_doc = firebase_service.db.collection('google_connections').document(user_uid).get()
-            
-            if connection_doc.exists:
-                connection_data = connection_doc.to_dict()
-                return {
-                    "connected": True,
-                    "user_info": {
-                        "email": connection_data.get('email'),
-                        "name": connection_data.get('name'),
-                        "photo": connection_data.get('photo'),
-                        "google_id": connection_data.get('google_id'),
-                    },
-                    "last_validated": connection_data.get('last_validated'),
-                    "id_token_verified": connection_data.get('id_token_verified', False)
-                }
-            else:
-                return {"connected": False, "user_info": None}
-                
-        except Exception as e:
-            logger.error(f"Error checking Google connection status: {e}")
-            return {"connected": False, "user_info": None}
-            
+            raise HTTPException(status_code=401, detail="Invalid user")
+        
+        # Check both locations for Google tokens
+        user_profile = await firebase_service.get_user_profile(user_uid)
+        tokens_doc = await firebase_service.get_document("google_tokens", user_uid)
+        
+        has_google_access = False
+        user_info = None
+        
+        if tokens_doc and tokens_doc.get('access_token'):
+            has_google_access = True
+            user_info = {
+                'email': tokens_doc.get('email'),
+                'name': tokens_doc.get('name'),
+                'photo': tokens_doc.get('photo'),
+                'id': tokens_doc.get('google_id')
+            }
+        elif user_profile and user_profile.get('google_access_token'):
+            has_google_access = True
+            google_tokens = user_profile.get('google_tokens', {})
+            user_info = {
+                'email': google_tokens.get('email') or user_profile.get('google_email'),
+                'name': google_tokens.get('name') or user_profile.get('google_name'),
+                'photo': google_tokens.get('photo') or user_profile.get('google_photo'),
+                'id': google_tokens.get('google_id') or user_profile.get('google_id')
+            }
+        
+        return {
+            "connected": has_google_access,
+            "user_id": user_uid,
+            "user_info": user_info
+        }
+        
     except Exception as e:
-        logger.error(f"Error in Google status endpoint: {e}")
-        raise HTTPException(status_code=500, detail="Failed to check Google connection status")
+        logger.error(f"❌ Error checking Google status: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to check Google status: {str(e)}")
 
 @app.post("/auth/google/token")
 async def store_google_tokens(
