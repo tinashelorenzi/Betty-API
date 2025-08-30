@@ -600,107 +600,458 @@ async def delete_account(user=Depends(get_current_user)):
 # ============================================================================
 
 @app.get("/auth/google/connect")
-async def connect_google_account(user=Depends(get_current_user)):
-    """Get Google OAuth URL for connecting account"""
+async def get_google_oauth_url(user=Depends(get_current_user)):
+    """
+    Get Google OAuth URL for web-based authentication
+    """
     try:
-        auth_url = google_service.get_authorization_url(user["uid"])
-        return {"authorization_url": auth_url}
+        import urllib.parse
+        from urllib.parse import urlencode
+        
+        # Google OAuth 2.0 parameters
+        oauth_params = {
+            'client_id': os.getenv('GOOGLE_CLIENT_ID'),
+            'redirect_uri': os.getenv('GOOGLE_REDIRECT_URI', f"{request.base_url}auth/google/callback"),
+            'scope': ' '.join([
+                'openid',
+                'profile',
+                'email',
+                'https://www.googleapis.com/auth/drive.file',
+                'https://www.googleapis.com/auth/documents',
+                'https://www.googleapis.com/auth/calendar'
+            ]),
+            'response_type': 'code',
+            'access_type': 'offline',
+            'prompt': 'consent',
+            'state': user.get('uid')  # Use uid as state for security
+        }
+        
+        oauth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(oauth_params)}"
+        
+        return {
+            "authorization_url": oauth_url,
+            "state": user.get('uid')
+        }
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error generating OAuth URL: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate OAuth URL: {str(e)}"
+        )
 
 @app.get("/auth/google/callback")
-async def google_oauth_callback(code: str, state: str):
-    """Handle Google OAuth callback"""
+async def google_oauth_callback(code: str = None, state: str = None, error: str = None):
+    """
+    Handle Google OAuth callback
+    """
     try:
-        result = await google_service.handle_oauth_callback(code, state)
+        if error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"OAuth error: {error}"
+            )
         
-        # Return HTML page that closes the browser and sends message back to React Native
-        html_content = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Google Authentication</title>
-        </head>
-        <body>
-            <script>
-                // For React Native WebView
-                if (window.ReactNativeWebView) {{
-                    window.ReactNativeWebView.postMessage(JSON.stringify({{
-                        type: 'GOOGLE_AUTH_SUCCESS',
-                        data: {json.dumps(result)}
-                    }}));
-                }}
-                // For regular browser
-                else {{
-                    window.opener && window.opener.postMessage({{
-                        type: 'GOOGLE_AUTH_SUCCESS',
-                        data: {json.dumps(result)}
-                    }}, '*');
-                    window.close();
-                }}
-            </script>
-            <h1>Authentication Successful!</h1>
-            <p>You can now close this window.</p>
-        </body>
-        </html>
-        """
+        if not code or not state:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Missing authorization code or state"
+            )
         
-        return HTMLResponse(content=html_content)
+        # Exchange authorization code for tokens
+        import requests
         
+        token_data = {
+            'client_id': os.getenv('GOOGLE_CLIENT_ID'),
+            'client_secret': os.getenv('GOOGLE_CLIENT_SECRET'),
+            'code': code,
+            'grant_type': 'authorization_code',
+            'redirect_uri': os.getenv('GOOGLE_REDIRECT_URI')
+        }
+        
+        token_response = requests.post(
+            'https://oauth2.googleapis.com/token',
+            data=token_data
+        )
+        
+        if not token_response.ok:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Failed to exchange authorization code"
+            )
+        
+        tokens = token_response.json()
+        access_token = tokens.get('access_token')
+        
+        # Get user info from Google
+        user_info_response = requests.get(
+            'https://www.googleapis.com/oauth2/v2/userinfo',
+            headers={'Authorization': f'Bearer {access_token}'}
+        )
+        
+        if user_info_response.ok:
+            user_info = user_info_response.json()
+        else:
+            user_info = {}
+        
+        # Store tokens for the user (state contains uid)
+        uid = state
+        user_ref = firebase_service.get_user_document_ref(uid)
+        
+        update_data = {
+            'google_access_token': access_token,
+            'google_refresh_token': tokens.get('refresh_token'),
+            'google_id_token': tokens.get('id_token'),
+            'google_user_info': user_info,
+            'google_connected': True,
+            'google_connected_at': datetime.now(timezone.utc),
+            'updated_at': datetime.now(timezone.utc)
+        }
+        
+        user_ref.update(update_data)
+        
+        # Redirect to app with success message
+        return {
+            "success": True,
+            "message": "Google account connected successfully!",
+            "redirect_url": "bettyapp://google-auth-success"  # Deep link to your app
+        }
+        
+    except HTTPException:
+        raise
     except Exception as e:
-        error_html = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Google Authentication Error</title>
-        </head>
-        <body>
-            <script>
-                // For React Native WebView
-                if (window.ReactNativeWebView) {{
-                    window.ReactNativeWebView.postMessage(JSON.stringify({{
-                        type: 'GOOGLE_AUTH_ERROR',
-                        error: '{str(e)}'
-                    }}));
-                }}
-                // For regular browser
-                else {{
-                    window.opener && window.opener.postMessage({{
-                        type: 'GOOGLE_AUTH_ERROR',
-                        error: '{str(e)}'
-                    }}, '*');
-                    window.close();
-                }}
-            </script>
-            <h1>Authentication Failed</h1>
-            <p>Error: {str(e)}</p>
-        </body>
-        </html>
-        """
-        return HTMLResponse(content=error_html, status_code=400)
+        logger.error(f"OAuth callback error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"OAuth callback failed: {str(e)}"
+        )
 
 
 @app.post("/auth/google/disconnect")
-async def disconnect_google_account(user=Depends(get_current_user)):
-    """Disconnect Google account"""
+async def disconnect_google(user=Depends(get_current_user)):
+    """
+    Disconnect user's Google account
+    """
     try:
-        success = await google_service.disconnect_google_account(user["uid"])
-        return {"success": success, "message": "Google account disconnected"}
+        uid = user.get('uid')
+        if not uid:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid user"
+            )
+        
+        # Clear Google tokens from Firestore
+        user_ref = firebase_service.get_user_document_ref(uid)
+        
+        update_data = {
+            'google_access_token': None,
+            'google_id_token': None,
+            'google_user_info': None,
+            'google_connected': False,
+            'google_connected_at': None,
+            'updated_at': datetime.now(timezone.utc)
+        }
+        
+        user_ref.update(update_data)
+        
+        logger.info(f"Google account disconnected for user {uid}")
+        return {
+            "success": True,
+            "message": "Google account disconnected successfully"
+        }
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error disconnecting Google: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to disconnect Google account: {str(e)}"
+        )
 
 @app.get("/auth/google/status")
-async def get_google_connection_status(user=Depends(get_current_user)):
-    """Check Google connection status"""
+async def get_google_status(user=Depends(get_current_user)):
+    """
+    Check if user has Google account connected
+    """
     try:
-        status = await google_service.check_google_connection_status(user["uid"])
-        return status
+        uid = user.get('uid')
+        if not uid:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid user"
+            )
+        
+        # Get user profile from Firestore
+        user_profile = await firebase_service.get_user_profile(uid)
+        
+        if not user_profile:
+            return {"connected": False, "message": "User profile not found"}
+        
+        # Check if user has Google tokens stored
+        has_google_access = (
+            user_profile.get('google_access_token') and 
+            user_profile.get('google_access_token').strip() != ""
+        )
+        
+        response_data = {
+            "connected": has_google_access,
+            "user_id": uid,
+        }
+        
+        if has_google_access and user_profile.get('google_user_info'):
+            response_data["user_info"] = user_profile.get('google_user_info')
+        
+        logger.info(f"Google status check for user {uid}: {has_google_access}")
+        return response_data
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error checking Google status: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to check Google status: {str(e)}"
+        )
+
+@app.post("/auth/google/token")
+async def store_google_tokens(
+    request: dict,
+    user=Depends(get_current_user)
+):
+    """
+    Store Google tokens after successful authentication
+    """
+    try:
+        uid = user.get('uid')
+        if not uid:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid user"
+            )
+        
+        access_token = request.get('access_token')
+        id_token = request.get('id_token')
+        user_info = request.get('user_info')
+        
+        if not access_token:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Access token is required"
+            )
+        
+        # Update user profile in Firestore with Google tokens
+        user_ref = firebase_service.get_user_document_ref(uid)
+        
+        update_data = {
+            'google_access_token': access_token,
+            'google_connected': True,
+            'google_connected_at': datetime.now(timezone.utc),
+            'updated_at': datetime.now(timezone.utc)
+        }
+        
+        if id_token:
+            update_data['google_id_token'] = id_token
+        
+        if user_info:
+            update_data['google_user_info'] = user_info
+        
+        # Update the user document
+        user_ref.update(update_data)
+        
+        logger.info(f"Google tokens stored successfully for user {uid}")
+        return {
+            "success": True,
+            "message": "Google account connected successfully",
+            "user_id": uid
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error storing Google tokens: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to store Google tokens: {str(e)}"
+        )
+
 
 # ============================================================================
 # GOOGLE DRIVE/DOCS ROUTES
 # ============================================================================
+
+@app.post("/documents/export/google-docs")
+async def export_to_google_docs(
+    request: dict,
+    user=Depends(get_current_user)
+):
+    """
+    Export document to Google Docs
+    """
+    try:
+        uid = user.get('uid')
+        if not uid:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid user"
+            )
+        
+        # Get user profile to check Google connection
+        user_profile = await firebase_service.get_user_profile(uid)
+        
+        if not user_profile or not user_profile.get('google_access_token'):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Google account not connected. Please connect your Google account first."
+            )
+        
+        access_token = user_profile.get('google_access_token')
+        document_title = request.get('title', 'Untitled Document')
+        document_content = request.get('content', '')
+        document_format = request.get('format', 'html')
+        
+        # Create Google Doc using Google Docs API
+        import requests
+        import json
+        
+        # Step 1: Create empty document
+        create_doc_url = 'https://docs.googleapis.com/v1/documents'
+        create_doc_data = {
+            'title': document_title
+        }
+        
+        create_response = requests.post(
+            create_doc_url,
+            headers={
+                'Authorization': f'Bearer {access_token}',
+                'Content-Type': 'application/json'
+            },
+            json=create_doc_data
+        )
+        
+        if not create_response.ok:
+            error_data = create_response.json()
+            if create_response.status_code == 401:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Google authentication expired. Please reconnect your Google account."
+                )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Failed to create Google Doc: {error_data.get('error', {}).get('message', 'Unknown error')}"
+            )
+        
+        doc_data = create_response.json()
+        document_id = doc_data['documentId']
+        
+        # Step 2: Insert content into document
+        if document_content.strip():
+            batch_update_url = f'https://docs.googleapis.com/v1/documents/{document_id}:batchUpdate'
+            
+            # Convert HTML to plain text if needed
+            if document_format == 'html':
+                from html import unescape
+                import re
+                # Simple HTML to text conversion
+                content_text = re.sub('<[^<]+?>', '', document_content)
+                content_text = unescape(content_text)
+            else:
+                content_text = document_content
+            
+            batch_update_data = {
+                'requests': [
+                    {
+                        'insertText': {
+                            'location': {'index': 1},
+                            'text': content_text
+                        }
+                    }
+                ]
+            }
+            
+            update_response = requests.post(
+                batch_update_url,
+                headers={
+                    'Authorization': f'Bearer {access_token}',
+                    'Content-Type': 'application/json'
+                },
+                json=batch_update_data
+            )
+            
+            if not update_response.ok:
+                logger.warning(f"Failed to update document content: {update_response.text}")
+                # Don't fail the export if content update fails
+        
+        # Generate document URL
+        doc_url = f"https://docs.google.com/document/d/{document_id}/edit"
+        
+        # Store document info in user's Firestore subcollection
+        try:
+            documents_ref = firebase_service.get_user_collection_ref(uid, 'exported_documents')
+            doc_ref = documents_ref.document(document_id)
+            
+            export_data = {
+                'document_id': document_id,
+                'title': document_title,
+                'google_doc_url': doc_url,
+                'exported_at': datetime.now(timezone.utc),
+                'content_length': len(document_content),
+                'format': document_format
+            }
+            
+            doc_ref.set(export_data)
+            logger.info(f"Document export record saved for user {uid}")
+            
+        except Exception as e:
+            logger.warning(f"Failed to save export record: {e}")
+            # Don't fail the export if record saving fails
+        
+        return {
+            "success": True,
+            "google_doc_id": document_id,
+            "google_doc_url": doc_url,
+            "message": f"Document '{document_title}' exported to Google Docs successfully!"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Document export error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to export document: {str(e)}"
+        )
+
+@app.get("/documents/exports")
+async def get_user_exports(user=Depends(get_current_user)):
+    """
+    Get user's exported documents history
+    """
+    try:
+        uid = user.get('uid')
+        if not uid:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid user"
+            )
+        
+        # Get user's exported documents from Firestore
+        documents_ref = firebase_service.get_user_collection_ref(uid, 'exported_documents')
+        docs = documents_ref.order_by('exported_at', direction='DESCENDING').limit(50).stream()
+        
+        exports = []
+        for doc in docs:
+            export_data = doc.to_dict()
+            export_data['id'] = doc.id
+            exports.append(export_data)
+        
+        return {
+            "exports": exports,
+            "total": len(exports)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting user exports: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get exports: {str(e)}"
+        )
 
 @app.post("/google/create-doc")
 async def create_google_doc(
