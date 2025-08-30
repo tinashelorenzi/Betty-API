@@ -1053,6 +1053,40 @@ async def get_user_exports(user=Depends(get_current_user)):
             detail=f"Failed to get exports: {str(e)}"
         )
 
+@app.post("/auth/google/store-tokens")
+async def store_google_tokens(
+    request: dict,
+    user=Depends(get_current_user)
+):
+    """Store Google tokens from native sign-in"""
+    try:
+        access_token = request.get('access_token')
+        id_token = request.get('id_token') 
+        user_info = request.get('user_info')
+        
+        if not access_token:
+            raise HTTPException(
+                status_code=400,
+                detail="Access token is required"
+            )
+        
+        # Use your existing GoogleService to store the tokens
+        result = await google_service.store_user_tokens(
+            user["uid"], 
+            access_token, 
+            id_token, 
+            user_info
+        )
+        
+        return {
+            "success": True,
+            "message": "Google tokens stored successfully",
+            "user_info": user_info
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/google/create-doc")
 async def create_google_doc(
     request: dict,

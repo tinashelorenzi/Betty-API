@@ -131,6 +131,38 @@ class GoogleService:
         """Get user's Google credentials for API calls - Private method (calls public method)"""
         return await self.get_user_credentials(user_id)
     
+    async def store_user_tokens(self, user_id: str, access_token: str, id_token: str = None, user_info: dict = None):
+        """Store user's Google tokens - add this to your GoogleService class"""
+        try:
+            # Store tokens in the google_tokens collection
+            tokens_data = {
+                "access_token": access_token,
+                "id_token": id_token,
+                "google_user_info": user_info,
+                "connected_at": datetime.utcnow(),
+                "user_id": user_id
+            }
+            
+            await self.firebase_service.create_document(
+                "google_tokens", 
+                tokens_data, 
+                doc_id=user_id
+            )
+            
+            # Update user profile
+            await self.firebase_service.update_user_profile(user_id, {
+                "google_connected": True,
+                "google_email": user_info.get("email") if user_info else None,
+                "google_name": user_info.get("name") if user_info else None,
+                "google_picture": user_info.get("picture") if user_info else None,
+                "google_connected_at": datetime.utcnow()
+            })
+            
+            return {"success": True}
+            
+        except Exception as e:
+            raise Exception(f"Failed to store tokens: {e}")
+    
     async def get_user_credentials(self, user_id: str) -> Optional[Credentials]:
         """Get and validate user's Google credentials"""
         try:
