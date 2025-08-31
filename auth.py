@@ -59,9 +59,24 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         return minimal_user
         
     except Exception as e:
-        print(f"❌ Token validation failed: {e}")
+        print(f"❌ Authentication failed: {e}")
+        print(f"❌ Error type: {type(e)}")
+        
+        # Provide more specific error messages
+        error_msg = str(e)
+        if "Token has expired" in error_msg:
+            detail = "Authentication token has expired. Please login again."
+        elif "Invalid token" in error_msg:
+            detail = "Invalid authentication token. Please login again."
+        elif "Token missing required fields" in error_msg:
+            detail = "Malformed authentication token. Please login again."
+        elif "not initialized" in error_msg.lower():
+            detail = "Authentication service temporarily unavailable."
+        else:
+            detail = f"Authentication failed: {error_msg}"
+        
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token or user not found",
+            detail=detail,
             headers={"WWW-Authenticate": "Bearer"},
         )
