@@ -748,12 +748,16 @@ class GoogleService:
             access_token = google_tokens.get("access_token")
             refresh_token = google_tokens.get("refresh_token")
             
-            if not access_token or not refresh_token:
-                print(f"❌ Missing required tokens for user {user_id}")
-                print(f"🔍 access_token exists: {bool(access_token)}")
-                print(f"🔍 refresh_token exists: {bool(refresh_token)}")
+            if not access_token:
+                print(f"❌ Missing access_token for user {user_id}")
                 print(f"🔍 Available keys: {list(google_tokens.keys())}")
                 return None
+            
+            # For mobile OAuth, refresh_token might not be available
+            if not refresh_token:
+                print(f"⚠️ No refresh_token found for user {user_id} (common for mobile OAuth)")
+                print(f"🔍 Will create credentials with access_token only")
+                # We'll try to use the access_token as is, knowing it will expire eventually
             
             # Create credentials object using the stored values OR environment variables
             client_id = google_tokens.get("client_id") or os.getenv("GOOGLE_CLIENT_ID")
@@ -766,14 +770,20 @@ class GoogleService:
                 'https://www.googleapis.com/auth/userinfo.profile'
             ]
             
-            credentials = Credentials(
-                token=access_token,
-                refresh_token=refresh_token,
-                token_uri=token_uri,
-                client_id=client_id,
-                client_secret=client_secret,
-                scopes=scopes
-            )
+            # Create credentials - handle missing refresh_token for mobile OAuth
+            credentials_kwargs = {
+                "token": access_token,
+                "token_uri": token_uri,
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "scopes": scopes
+            }
+            
+            # Only add refresh_token if it exists (mobile OAuth often doesn't provide it)
+            if refresh_token:
+                credentials_kwargs["refresh_token"] = refresh_token
+            
+            credentials = Credentials(**credentials_kwargs)
             
             # Set expiry if available
             expiry_str = google_tokens.get("expiry") or google_tokens.get("expires_at")
@@ -785,7 +795,12 @@ class GoogleService:
                     print(f"⚠️ Could not parse expiry date: {e}")
             
             # Check if credentials are expired and refresh if needed
-            if credentials.expired and credentials.refresh_token:
+            if credentials.expired:
+                if not credentials.refresh_token:
+                    print(f"⚠️ Token expired and no refresh_token available for user {user_id}")
+                    print(f"🔄 User will need to re-authenticate via mobile app")
+                    return None
+                
                 try:
                     print(f"🔄 Refreshing expired credentials for user {user_id}")
                     request = Request()

@@ -17,10 +17,15 @@ class AuthService:
     
     def __init__(self, firebase_service: FirebaseService):
         self.firebase_service = firebase_service
-        self.jwt_secret = secrets.token_urlsafe(32)
-        self.jwt_secret = os.getenv('JWT_SECRET_KEY', 'your_super_secret_jwt_key_here')
+        # Fix: Use consistent JWT secret from environment or generate one that persists
+        self.jwt_secret = os.getenv('JWT_SECRET_KEY')
+        if not self.jwt_secret:
+            # Generate a secret and warn that it should be set in production
+            self.jwt_secret = 'your_super_secret_jwt_key_here'
+            print("⚠️ WARNING: JWT_SECRET_KEY not set in environment. Using default secret. This is insecure for production!")
+        
         self.jwt_algorithm = os.getenv('JWT_ALGORITHM', 'HS256')
-        self.jwt_expiry_minutes = int(os.getenv('JWT_ACCESS_TOKEN_EXPIRE_MINUTES', '60'))
+        self.jwt_expiry_minutes = int(os.getenv('JWT_ACCESS_TOKEN_EXPIRE_MINUTES', '1440'))  # 24 hours default
     
     def create_jwt_token(self, uid: str, email: str) -> str:
         """Create JWT token for user"""
@@ -35,12 +40,32 @@ class AuthService:
     def verify_jwt_token(self, token: str) -> Dict[str, Any]:
         """Verify JWT token and return payload"""
         try:
+            # Decode and verify the token
             payload = jwt.decode(token, self.jwt_secret, algorithms=[self.jwt_algorithm])
+            
+            # Validate required fields
+            if 'uid' not in payload or 'email' not in payload:
+                raise Exception("Token missing required fields")
+            
+            # Check if token is expired (PyJWT handles this automatically, but let's be explicit)
+            if 'exp' in payload:
+                exp_timestamp = payload['exp']
+                current_timestamp = datetime.now(timezone.utc).timestamp()
+                if current_timestamp > exp_timestamp:
+                    raise Exception("Token has expired")
+            
+            print(f"🔍 JWT token verified for user: {payload.get('email')} (UID: {payload.get('uid')})")
             return payload
+            
         except jwt.ExpiredSignatureError:
+            print(f"❌ JWT token expired for token: {token[:20]}...")
             raise Exception("Token has expired")
-        except jwt.InvalidTokenError:
-            raise Exception("Invalid token")
+        except jwt.InvalidTokenError as e:
+            print(f"❌ JWT token invalid: {str(e)} for token: {token[:20]}...")
+            raise Exception(f"Invalid token: {str(e)}")
+        except Exception as e:
+            print(f"❌ JWT token verification failed: {str(e)}")
+            raise Exception(f"Token verification failed: {str(e)}")
     
     async def create_user(self, user_data: UserCreate) -> UserResponse:
         """Create new user with Firebase Auth"""
