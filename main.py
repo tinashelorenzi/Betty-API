@@ -358,11 +358,16 @@ async def register_user(user_data: UserCreate):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+class LoginRequest(BaseModel):
+    username: str  # React Native sends 'username' field containing the email
+    password: str
+
 @app.post("/auth/login")
-async def login_user(email: str, password: str):
+async def login_user(login_request: LoginRequest):
     """Verify user exists - client handles Firebase Auth"""
     try:
-        result = await auth_service.login_user(email, password)
+        # React Native sends 'username' field but it contains the email
+        result = await auth_service.login_user(login_request.username, login_request.password)
         return result
     except Exception as e:
         raise HTTPException(status_code=401, detail=str(e))
